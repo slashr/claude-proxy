@@ -55,25 +55,14 @@ if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|m
   worker_mode="write"
 fi
 
-# Operational questions benefit from current runtime evidence and project
-# memory, rather than a broad source-tree inventory. Keep this narrow so it
-# does not change the approach for ordinary repository investigations.
-worker_strategy="default"
-if [[ "$worker_mode" == "read" \
-  && "$prompt_for_mode" =~ (homelab|cluster|k3s|kubernetes|k8s|node|pod|tailscale|tailnet|workload|service) \
-  && "$prompt_for_mode" =~ (healthy|health|status|ready|unhealthy|down|up|failing|failure|crashloop|availability|running) ]]; then
-  worker_strategy="operational"
-fi
-
 jq -n \
   --arg job_id "$job_id" \
   --arg codex_session_id "$codex_session_id" \
   --arg prompt "$prompt" \
   --arg working_dir "$working_dir" \
   --arg worker_mode "$worker_mode" \
-  --arg worker_strategy "$worker_strategy" \
   --argjson started_at "$(date +%s)" \
-  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,working_dir:$working_dir,worker_mode:$worker_mode,worker_strategy:$worker_strategy,state:"queued",started_at:$started_at}' >"$job_file"
+  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,working_dir:$working_dir,worker_mode:$worker_mode,state:"queued",started_at:$started_at}' >"$job_file"
 
 # One Claude session must have one active worker. Concurrent --resume calls
 # race the session transcript and can leave the activity card permanently stale.
