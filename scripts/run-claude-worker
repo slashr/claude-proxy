@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+job_file=${1:?job file is required}
+plugin_data_dir=${2:?plugin data directory is required}
+
+umask 077
+session_dir="$plugin_data_dir/claude-sessions"
+activity_dir="$plugin_data_dir/claude-activity"
+mkdir -p "$session_dir" "$activity_dir"
+
+job_id=$(jq -er '.job_id' "$job_file")
+codex_session_id=$(jq -er '.codex_session_id' "$job_file")
+prompt=$(jq -er '.prompt' "$job_file")
+worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
+activity_file="$activity_dir/$job_id.jsonl"
+session_file="$session_dir/$codex_session_id"
+session_lock="$session_dir/$codex_session_id.lock"
+
+cleanup_lock() {
+  if [[ $(cat "$session_lock/job_id" 2>/dev/null || true) == "$job_id" ]]; then
+    rm -f "$session_lock/job_id"
+    rmdir "$session_lock" 2>/dev/null || true
+  fi
+}
+trap cleanup_lock EXIT
+
+case "$worker_mode" in
+  read) permission_mode="plan" ;;
+  write) permission_mode="acceptEdits" ;;
+  *)
+    printf '%s\n' "Unsupported Claude worker mode: $worker_mode" >&2
+    exit 2
+    ;;
+esac
+
+write_job() {
+  local state=$1
+  local detail=${2:-}
+  local result=${3:-}
+  local claude_session=${4:-}
+  local summary=${5:-}
+  local temporary="$job_file.tmp"
+  jq -n \
+    --arg job_id "$job_id" \
+    --arg codex_session_id "$codex_session_id" \
+    --arg activity_file "$activity_file" \
+    --arg worker_mode "$worker_mode" \
+    --arg state "$state" \
+    --arg detail "$detail" \
+    --arg result "$result" \
+    --arg claude_session_id "$claude_session" \
+    --arg tool_summary "$summary" \
+    --argjson started_at "$(jq -r '.started_at' "$job_file")" \
+    --argjson updated_at "$(date +%s)" \
+    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,worker_mode:$worker_mode,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at}' >"$temporary"
+  mv "$temporary" "$job_file"
+}
+
+safe_summary() {
+  jq -rs '
+    [ .[]
+      | select(.type == "assistant")
+      | .message.content[]?
+      | select(.type == "tool_use")
+      | .name
+    ]
+    | group_by(.)
+    | map("\(.[0]): \(length)")
+    | if length == 0 then "No Claude tool calls reported." else join(", ") end
+  ' "$activity_file" 2>/dev/null || printf 'Tool activity could not be summarized.'
+}
+
+: >"$activity_file"
+write_job "running" "Claude worker is starting in $worker_mode mode."
+
+claude_bin=$(command -v claude || true)
+if [[ -z "$claude_bin" && -x "${HOME:-}/.local/bin/claude" ]]; then
+  claude_bin="${HOME}/.local/bin/claude"
+fi
+if [[ -z "$claude_bin" ]]; then
+  write_job "failed" "Claude CLI is unavailable to the worker." "" "" "No Claude tool calls reported."
+  exit 127
+fi
+
+claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5)
+if [[ -s "$session_file" ]]; then
+  claude_args+=(--resume "$(<"$session_file")")
+fi
+
+set +e
+"$claude_bin" "${claude_args[@]}" \
+  --append-system-prompt "Act as the primary worker for this task. Work in the supplied current directory. The worker mode is $worker_mode: in read mode, use only authorized read-only tools; in write mode, make only file changes that are clearly within the user's request and do not make external-state changes unless explicitly requested. Return concise evidence plus blockers. Codex will verify and present the result. Do not disclose private reasoning; tool calls and concise progress are enough." \
+  "$prompt" 2>&1 | tee "$activity_file" >/dev/null
+claude_status=${PIPESTATUS[0]}
+set -e
+
+summary=$(safe_summary)
+result_event=$(jq -se '[.[] | select(.type == "result")] | last' "$activity_file" 2>/dev/null || true)
+if [[ $claude_status -ne 0 || -z "$result_event" || "$result_event" == "null" ]]; then
+  retry_error=$(jq -r 'select(.type == "system" and .subtype == "api_retry") | .error' "$activity_file" 2>/dev/null | tail -1)
+  if [[ -n "$retry_error" ]]; then
+    write_job "failed" "Claude worker failed after provider retries: $retry_error." "" "" "$summary"
+  else
+    write_job "failed" "Claude worker exited before returning a result." "" "" "$summary"
+  fi
+  exit "$claude_status"
+fi
+
+if [[ $(jq -r '.is_error // false' <<<"$result_event") == "true" ]]; then
+  write_job "failed" "Claude returned an error result." "" "" "$summary"
+  exit 1
+fi
+
+claude_result=$(jq -er '.result' <<<"$result_event")
+claude_session_id=$(jq -er '.session_id' <<<"$result_event")
+printf '%s\n' "$claude_session_id" >"$session_file"
+write_job "completed" "Claude worker completed." "$claude_result" "$claude_session_id" "$summary"

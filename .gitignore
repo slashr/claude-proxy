@@ -1,0 +1,8 @@
+# Installed snapshots and runtime state are per-account and must never be committed.
+.codex/
+.agents/
+node_modules/
+npm-debug.log*
+*.log
+.DS_Store
+

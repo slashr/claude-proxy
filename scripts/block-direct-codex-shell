@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+hook_input=$(cat)
+plugin_data_dir=${PLUGIN_DATA:-${CLAUDE_PLUGIN_DATA:-}}
+if [[ -z "$plugin_data_dir" ]]; then
+  printf '%s\n' 'Claude proxy requires PLUGIN_DATA or CLAUDE_PLUGIN_DATA.' >&2
+  exit 1
+fi
+codex_session_id=$(printf '%s' "$hook_input" | jq -er '.session_id')
+
+# Honour the explicit current-prompt opt-out recorded by UserPromptSubmit.
+if [[ -f "$plugin_data_dir/claude-sessions/$codex_session_id.bypass" ]]; then
+  exit 0
+fi
+
+# The prompt hook has already run Claude. Block local Codex shell work so a
+# model cannot quietly replace Claude with kubectl, aws, git, or another CLI.
+
+printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Direct Codex shell work is blocked. The UserPromptSubmit hook has already dispatched this task to Claude; synthesize the injected worker result instead."}}'

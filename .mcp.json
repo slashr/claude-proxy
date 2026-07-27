@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "claudeProxyActivity": {
+      "title": "Claude worker activity",
+      "description": "Shows and waits for asynchronous Claude Code worker jobs.",
+      "cwd": ".",
+      "command": "node",
+      "args": [
+        "./mcp/server.cjs",
+        "--stdio"
+      ]
+    }
+  }
+}

@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: run-claude-proxy [--mode read|write] [--session-id UUID] [--model MODEL] -- PROMPT
+
+Runs Claude Code in persistent structured-output mode.
+  read  Uses Claude's plan permission mode. This is the default.
+  write Uses Claude's acceptEdits permission mode. Use only after the user
+        explicitly authorizes the requested file or external-state changes.
+EOF
+}
+
+mode="read"
+session_id=""
+model=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      mode="$2"
+      shift 2
+      ;;
+    --session-id)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      session_id="$2"
+      shift 2
+      ;;
+    --model)
+      [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+      model="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+[[ $# -eq 1 ]] || { usage >&2; exit 2; }
+command -v claude >/dev/null 2>&1 || {
+  echo 'Claude Code CLI is not available on PATH.' >&2
+  exit 127
+}
+
+case "$mode" in
+  read) permission_mode="plan" ;;
+  write) permission_mode="acceptEdits" ;;
+  *)
+    echo "Unsupported mode: $mode" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
+
+args=(-p --output-format json --permission-mode "$permission_mode")
+[[ -z "$session_id" ]] || args+=(--resume "$session_id")
+[[ -z "$model" ]] || args+=(--model "$model")
+
+exec claude "${args[@]}" "$1"

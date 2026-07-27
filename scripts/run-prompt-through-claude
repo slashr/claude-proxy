@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+hook_input=$(cat)
+prompt=$(printf '%s' "$hook_input" | jq -er '.prompt')
+codex_session_id=$(printf '%s' "$hook_input" | jq -er '.session_id')
+plugin_data_dir=${PLUGIN_DATA:-${CLAUDE_PLUGIN_DATA:-}}
+if [[ -z "$plugin_data_dir" ]]; then
+  printf '%s\n' 'Claude proxy requires PLUGIN_DATA or CLAUDE_PLUGIN_DATA.' >&2
+  exit 1
+fi
+plugin_root=${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}
+if [[ -z "$plugin_root" ]]; then
+  printf '%s\n' 'Claude proxy requires PLUGIN_ROOT or CLAUDE_PLUGIN_ROOT.' >&2
+  exit 1
+fi
+plugin_root=${plugin_root#file://}
+session_dir="$plugin_data_dir/claude-sessions"
+session_file="$session_dir/$codex_session_id"
+session_lock="$session_dir/$codex_session_id.lock"
+activity_dir="$plugin_data_dir/claude-activity"
+job_dir="$plugin_data_dir/claude-jobs"
+umask 077
+mkdir -p "$session_dir"
+mkdir -p "$activity_dir"
+mkdir -p "$job_dir"
+
+# An explicit user opt-out is the only automatic exception. It applies only to
+# this prompt; the next prompt resets the session back to Claude routing. The
+# exact /codex marker is the predictable app-friendly form.
+if [[ "$prompt" =~ (^|[[:space:]])/codex([[:space:]]|$) || "$prompt" =~ [Dd][Oo][[:space:]]+[Nn][Oo][Tt][[:space:]]+[Uu][Ss][Ee][[:space:]]+[Cc]laude ]]; then
+  : >"$session_file.bypass"
+  jq -n '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:"Claude proxy bypassed for this prompt because the user explicitly asked not to use Claude."}}'
+  exit 0
+fi
+
+rm -f "$session_file.bypass"
+turn_id=$(printf '%s' "$hook_input" | jq -r '.turn_id // empty')
+job_id="${codex_session_id}-${turn_id:-$(date +%s)}"
+job_file="$job_dir/$job_id.json"
+
+# File changes need an explicit user request. Keep read-only investigations,
+# explanations, and reviews in Claude's plan mode; use acceptEdits only for
+# implementation language. This is intentionally not a permission bypass:
+# Claude still has its normal command and external-state safeguards.
+worker_mode="read"
+prompt_for_mode=$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')
+if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe)([^[:alpha:]]|$) ]]; then
+  worker_mode="write"
+fi
+
+jq -n \
+  --arg job_id "$job_id" \
+  --arg codex_session_id "$codex_session_id" \
+  --arg prompt "$prompt" \
+  --arg worker_mode "$worker_mode" \
+  --argjson started_at "$(date +%s)" \
+  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,worker_mode:$worker_mode,state:"queued",started_at:$started_at}' >"$job_file"
+
+# One Claude session must have one active worker. Concurrent --resume calls
+# race the session transcript and can leave the activity card permanently stale.
+if ! mkdir "$session_lock" 2>/dev/null; then
+  active_job=$(cat "$session_lock/job_id" 2>/dev/null || true)
+  active_file="$job_dir/$active_job.json"
+  active_state=$(jq -r '.state // empty' "$active_file" 2>/dev/null || true)
+  if [[ "$active_state" == "queued" || "$active_state" == "running" ]]; then
+    rm -f "$job_file"
+    jq -n --arg job_id "$active_job" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker is already running for this task. Do not start another worker; call `show_claude_worker` and `wait_for_claude_worker` with job_id `" + $job_id + "`.")}}'
+    exit 0
+  fi
+  rm -f "$session_lock/job_id"
+  rmdir "$session_lock" 2>/dev/null || true
+  mkdir "$session_lock"
+fi
+printf '%s\n' "$job_id" >"$session_lock/job_id"
+
+launch_label="com.claude-proxy.worker.${job_id}.${RANDOM}"
+if ! /bin/launchctl submit -l "$launch_label" \
+  -o "$job_dir/$job_id.launch.log" \
+  -e "$job_dir/$job_id.launch.err.log" \
+  -- /usr/bin/env "HOME=${HOME:-}" "PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" \
+  /bin/bash "$plugin_root/scripts/run-claude-worker" "$job_file" "$plugin_data_dir"; then
+  rm -f "$session_lock/job_id" "$job_file"
+  rmdir "$session_lock" 2>/dev/null || true
+  exit 1
+fi
+
+jq -n --arg job_id "$job_id" --arg worker_mode "$worker_mode" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker was started asynchronously in " + $worker_mode + " mode. Immediately call the available Claude worker activity tool `show_claude_worker` with job_id `" + $job_id + "` so the user receives the live inline status card. Then call `wait_for_claude_worker` with the same job_id and synthesize its worker result in Codex voice. Do not use direct Codex shell commands for the task. The activity card may show safe status and tool names, never private reasoning or raw tool inputs.")}}'

@@ -1,0 +1,30 @@
+{
+  "description": "Inject the Claude proxy policy into every submitted Codex prompt.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh -c 'root=${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}; root=${root#file://}; export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin; exec /bin/bash \"$root/scripts/run-prompt-through-claude\"'",
+            "timeout": 600,
+            "statusMessage": "Running Claude worker"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh -c 'root=${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}; root=${root#file://}; export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin; exec /bin/bash \"$root/scripts/block-direct-codex-shell\"'",
+            "timeout": 3,
+            "statusMessage": "Enforcing Claude worker routing"
+          }
+        ]
+      }
+    ]
+  }
+}

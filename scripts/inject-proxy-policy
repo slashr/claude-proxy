@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Consume the hook event without writing prompt content or session data to disk.
+cat >/dev/null
+
+printf '%s\n' '{"systemMessage":"MANDATORY CLAUDE-PROXY GATE: For every substantive task, use the Claude worker job supplied by the prompt hook. First open its Claude activity card, then wait for its worker result. Do not use kubectl, aws, shell, web, Codex subagents, or other worker tools before that Claude worker pass completes. Codex may only orchestrate, authorize, verify Claude findings, and write the final response. Exceptions: trivial self-contained answers, Codex-only connector/UI work, or an explicit user instruction not to use Claude."}'

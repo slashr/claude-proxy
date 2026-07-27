@@ -1,0 +1,22 @@
+{
+  "name": "claude-proxy",
+  "version": "0.1.0+codex.20260727155619",
+  "description": "Runs Claude Code workers with a live inline activity view in ChatGPT desktop.",
+  "author": {
+    "name": "Akash"
+  },
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Claude Proxy",
+    "shortDescription": "Use Claude Code with live worker activity.",
+    "longDescription": "Routes substantive tasks to Claude Code while an inline activity card shows safe live worker progress, then returns the result to Codex for verification and presentation.",
+    "developerName": "Akash",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "MCP"
+    ],
+    "defaultPrompt": "Use Claude as the worker for this task, then verify and summarize the result."
+  }
+}
