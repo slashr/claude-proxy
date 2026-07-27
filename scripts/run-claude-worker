@@ -109,11 +109,8 @@ if [[ -s "$session_file" ]]; then
   claude_args+=(--resume "$(<"$session_file")")
 fi
 
-worker_guidance="Act as the primary worker for this task. Work in the supplied current directory. The worker mode is $worker_mode: in read mode, use only authorized read-only tools; in write mode, make only file changes that are clearly within the user's request and do not make external-state changes unless explicitly requested. Return concise evidence plus blockers. Codex will verify and present the result. Do not disclose private reasoning; tool calls and concise progress are enough."
-
 set +e
 CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${claude_args[@]}" \
-  --append-system-prompt "$worker_guidance" \
   "$prompt" 2>&1 | tee "$activity_file" >/dev/null
 claude_status=${PIPESTATUS[0]}
 set -e
