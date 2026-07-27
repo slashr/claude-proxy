@@ -65,9 +65,10 @@ small task where delegating to Claude is unnecessary.
 
 ## Worker permissions
 
-Claude workers run headlessly with automatic approval enabled in both read and
-write modes, so Claude can perform the requested shell, file, and PR work
-without an interactive prompt. Worker polling is bounded below the desktop
+Claude workers run headlessly with Claude Auto Mode in both read and write
+modes. Auto Mode's classifier remains responsible for deciding which actions
+are allowed; the worker no longer enables `bypassPermissions` or
+`--dangerously-skip-permissions`. Worker polling is bounded below the desktop
 host timeout, stale Claude session IDs are retried from a fresh session, and
 unexpected worker exits finalize as failed jobs instead of remaining
 permanently running.

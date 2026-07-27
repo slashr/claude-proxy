@@ -30,7 +30,7 @@ cleanup_lock() {
 }
 
 case "$worker_mode" in
-  read|write) permission_mode="bypassPermissions" ;;
+  read|write) permission_mode="auto" ;;
   *)
     printf '%s\n' "Unsupported Claude worker mode: $worker_mode" >&2
     exit 2
@@ -116,7 +116,7 @@ if [[ -z "$claude_bin" ]]; then
   exit 127
 fi
 
-base_claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --dangerously-skip-permissions --model claude-opus-5)
+base_claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5)
 
 run_claude() {
   local -a args=("$@")
