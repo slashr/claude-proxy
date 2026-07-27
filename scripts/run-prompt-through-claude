@@ -51,7 +51,8 @@ job_file="$job_dir/$job_id.json"
 # Claude still has its normal command and external-state safeguards.
 worker_mode="read"
 prompt_for_mode=$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')
-if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe)([^[:alpha:]]|$) ]]; then
+if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe|commit|push|publish)([^[:alpha:]]|$) \
+  || "$prompt_for_mode" =~ (open|submit)[[:space:]]+(a[[:space:]]+)?(pull[[:space:]]+request|pr) ]]; then
   worker_mode="write"
 fi
 
