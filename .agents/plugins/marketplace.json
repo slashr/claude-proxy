@@ -1,0 +1,20 @@
+{
+  "name": "slashr",
+  "interface": {
+    "displayName": "Slashr"
+  },
+  "plugins": [
+    {
+      "name": "claude-proxy",
+      "source": {
+        "source": "local",
+        "path": "./plugins/claude-proxy"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,49 +1,28 @@
 # Claude Proxy plugin
 
-This repository is the editable source for the local Claude Proxy plugin. It
-contains no Claude credentials, installed-plugin cache, worker jobs, sessions,
-or activity logs.
+This repository is a Codex plugin marketplace containing the editable Claude
+Proxy source at `plugins/claude-proxy`. It contains no Claude credentials,
+installed-plugin cache, worker jobs, sessions, or activity logs.
 
 ## First-time setup in a macOS account
 
 Run these commands as the account that uses the ChatGPT desktop app. The
 example below assumes this repository was cloned to `~/Code/claude-plugin`.
 
-The public source repository is [github.com/slashr/claude-proxy](https://github.com/slashr/claude-proxy),
-so another macOS account can clone it without GitHub credentials:
+The public marketplace is [github.com/slashr/claude-proxy](https://github.com/slashr/claude-proxy).
+Add it directly from GitHub, then install the plugin from its `slashr`
+marketplace:
 
 ```bash
-git clone https://github.com/slashr/claude-proxy.git ~/Code/claude-plugin
+codex plugin marketplace add slashr/claude-proxy --ref main
+codex plugin add claude-proxy@slashr
 ```
+
+If this account previously used `claude-proxy@personal`, remove it first so
+only one copy installs hooks:
 
 ```bash
-mkdir -p ~/plugins
-ln -sfn ~/Code/claude-plugin ~/plugins/claude-proxy
-```
-
-The default personal marketplace resolves `./plugins/claude-proxy` from the
-home directory. Create or update `~/.agents/plugins/marketplace.json` with the
-following plugin entry. Preserve any other marketplace entries already there.
-
-```json
-{
-  "name": "claude-proxy",
-  "source": {
-    "source": "local",
-    "path": "./plugins/claude-proxy"
-  },
-  "policy": {
-    "installation": "AVAILABLE",
-    "authentication": "ON_INSTALL"
-  },
-  "category": "Productivity"
-}
-```
-
-Then install it:
-
-```bash
-codex plugin add claude-proxy@personal
+codex plugin remove claude-proxy@personal
 ```
 
 Quit and reopen ChatGPT. Open `/hooks` once and trust the two plugin hooks.
@@ -75,13 +54,16 @@ permanently running.
 
 ## Updating
 
-Pull the repository, make the desired source change, validate it, cache-bust,
-and reinstall:
+Pull the repository, make the desired source change under
+`plugins/claude-proxy`, validate it, cache-bust, push it, refresh the Git
+marketplace, and reinstall:
 
 ```bash
-python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py ~/Code/claude-plugin
-python3 ~/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py ~/Code/claude-plugin
-codex plugin add claude-proxy@personal
+python3 ~/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py ~/Code/claude-plugin/plugins/claude-proxy
+python3 ~/.codex/skills/.system/plugin-creator/scripts/update_plugin_cachebuster.py ~/Code/claude-plugin/plugins/claude-proxy
+git -C ~/Code/claude-plugin push
+codex plugin marketplace upgrade slashr
+codex plugin add claude-proxy@slashr
 ```
 
 Quit and reopen ChatGPT after every reinstall because the app keeps the prior
@@ -101,6 +83,5 @@ git commit -m "Add Claude Proxy plugin"
 ```
 
 Push it to the public repository when sharing the source across macOS
-accounts. This GitHub repository is separate from the OpenAI universal plugin
-directory; each account still installs the local plugin and authenticates its
-own Claude Code CLI session.
+accounts. Each account installs the Git marketplace and authenticates its own
+Claude Code CLI session.
