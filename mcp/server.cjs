@@ -196,6 +196,33 @@ function widgetHtml(resourceUri = WIDGET_URI) {
   .warn { color:#c26b00; }
   @keyframes pulse { 50% { opacity:.45; } }
 </style>
+<style>
+  /* Compact Codex-style inline chrome: the timeline duplicates the transcript. */
+  #claude-worker-card {
+    max-width: 700px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font-size: 13px;
+    line-height: 18px;
+  }
+  #claude-worker-card .content { padding: 0; }
+  #claude-worker-card .mark { width: 20px; height: 20px; border-radius: 6px; font-size: 12px; }
+  #claude-worker-card .state { padding: 2px 8px; font-size: 11px; }
+  #claude-worker-card .tool-summary { gap: 6px; margin-top: 6px; padding: 7px 9px; }
+  #claude-worker-card .timeline { display: none; }
+  #claude-worker-card .transcript { margin-top: 8px; gap: 6px; }
+  #claude-worker-card .transcript > details { margin: 0; }
+  #claude-worker-card .entry {
+    padding: 7px 9px;
+    border-radius: 8px;
+    background: transparent;
+  }
+  #claude-worker-card .entry-head { font-size: 12px; line-height: 16px; margin-bottom: 3px; }
+  #claude-worker-card .entry pre { margin-top: 4px; font-size: 10px; }
+  #claude-worker-card .tool-body { padding: 0 9px 8px; }
+  #claude-worker-card .notice { padding: 8px 0 0; font-size: 11px; background: transparent; }
+</style>
 <section id="claude-worker-card" aria-live="polite">
   <div class="content">
     <div class="head"><div class="brand"><span class="mark">✦</span><span>Claude worker</span></div><span id="state" class="state">Connecting</span></div>
