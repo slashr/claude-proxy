@@ -101,9 +101,11 @@ function activityDetails(activityFile) {
         if (event.type === "user" && block?.type === "tool_result" && typeof block.tool_use_id === "string") {
           const tracked = toolEvents.get(block.tool_use_id);
           if (tracked) {
-            tracked.item.status = block.is_error ? "failed" : "completed";
+            const output = preview(block.content, 1100);
+            const readOnlyGuard = block.is_error && /Read-mode Claude workers cannot/.test(output);
+            tracked.item.status = readOnlyGuard ? "guarded" : block.is_error ? "failed" : "completed";
             tracked.transcriptItem.status = tracked.item.status;
-            tracked.transcriptItem.output = preview(block.content, 1100);
+            tracked.transcriptItem.output = output;
           }
         }
       }
@@ -116,6 +118,7 @@ function activityDetails(activityFile) {
   const visibleTimeline = timeline.slice(-12).map(({ kind, label, status }) => ({ kind, label, status }));
   const currentTool = [...visibleTimeline].reverse().find(item => item.kind === "tool" && item.status === "running");
   const failedTool = [...visibleTimeline].reverse().find(item => item.kind === "tool" && item.status === "failed");
+  const guardedTool = [...visibleTimeline].reverse().find(item => item.kind === "tool" && item.status === "guarded");
   return {
     event_count: events,
     assistant_update_count: assistantUpdates,
@@ -125,7 +128,7 @@ function activityDetails(activityFile) {
     tool_calls: [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, count]) => ({ name, count })),
     timeline: visibleTimeline,
     transcript: transcript.slice(-30),
-    phase: failedTool ? `${failedTool.label} needs attention` : currentTool ? `Running ${currentTool.label}` : hasResult ? "Preparing final answer" : initialized ? "Preparing work" : "Starting Claude worker",
+    phase: failedTool ? `${failedTool.label} needs attention` : currentTool ? `Running ${currentTool.label}` : guardedTool ? "Continuing in read-only mode" : hasResult ? "Preparing final answer" : initialized ? "Preparing work" : "Starting Claude worker",
   };
 }
 
@@ -456,7 +459,7 @@ function toolError(error) {
 function tools() {
   const schema = { type: "object", properties: { job_id: { type: "string", description: "Claude worker job ID supplied by the prompt hook." } }, required: ["job_id"], additionalProperties: false };
   return [
-    { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Call this immediately when the prompt hook supplies a job ID.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
+    { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Use only when the user explicitly asks to inspect activity.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "claude_is_working", title: "Claude is working…", description: "Wait until a Claude worker finishes or emits a new safe progress message. When state is running and progress_message is present, relay it to the user, then call this tool again. When it finishes, synthesize worker_result.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
@@ -498,7 +501,7 @@ async function handle(message) {
   if (!plainObject(message)) return rpcError(null, -32600, "Invalid Request");
   if (typeof message.method !== "string") return rpcError(message.id ?? null, -32600, "Invalid method");
   if (message.method.startsWith("notifications/") || message.method === "$/cancelRequest") return null;
-  if (message.method === "initialize") return rpc(message.id, { protocolVersion: message.params?.protocolVersion || "2024-11-05", capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: SERVER_NAME, title: "Claude worker activity", version: SERVER_VERSION }, instructions: "Use show_claude_worker immediately after the Claude prompt hook provides a job ID, then claude_is_working before responding." });
+  if (message.method === "initialize") return rpc(message.id, { protocolVersion: message.params?.protocolVersion || "2024-11-05", capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: SERVER_NAME, title: "Claude worker activity", version: SERVER_VERSION }, instructions: "Use claude_is_working after the Claude prompt hook provides a job ID. Open show_claude_worker only when the user explicitly asks to inspect activity." });
   if (message.method === "ping") return rpc(message.id, {});
   if (message.method === "tools/list") return rpc(message.id, { tools: tools() });
   if (message.method === "tools/call") {
