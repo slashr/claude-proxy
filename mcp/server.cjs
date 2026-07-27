@@ -59,6 +59,8 @@ function activityDetails(activityFile) {
   let retryError = null;
   let initialized = false;
   let hasResult = false;
+  let assistantUpdates = 0;
+  let latestAssistantMessage = null;
   const transcript = [];
   try {
     for (const line of fs.readFileSync(activityFile, "utf8").split("\n")) {
@@ -80,7 +82,11 @@ function activityDetails(activityFile) {
         }
         if (event.type === "assistant" && block?.type === "text") {
           const text = preview(block.text, 1600);
-          if (text) transcript.push({ kind: "assistant", text });
+          if (text) {
+            assistantUpdates += 1;
+            latestAssistantMessage = text;
+            transcript.push({ kind: "assistant", text });
+          }
         }
         if (event.type === "assistant" && block?.type === "tool_use" && typeof block.name === "string") {
           const name = safeText(block.name);
@@ -112,6 +118,8 @@ function activityDetails(activityFile) {
   const failedTool = [...visibleTimeline].reverse().find(item => item.kind === "tool" && item.status === "failed");
   return {
     event_count: events,
+    assistant_update_count: assistantUpdates,
+    latest_assistant_message: latestAssistantMessage,
     retries,
     retry_error: retryError,
     tool_calls: [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, count]) => ({ name, count })),
@@ -137,6 +145,8 @@ function snapshot(jobId, rich = false) {
     updated_at: job.updated_at || job.started_at || null,
     elapsed_seconds: job.started_at ? Math.max(0, elapsedReference - job.started_at) : null,
     event_count: activity.event_count,
+    assistant_update_count: activity.assistant_update_count,
+    progress_message: activity.latest_assistant_message,
     retries: activity.retries,
     retry_error: activity.retry_error,
     tool_calls: activity.tool_calls,
@@ -420,7 +430,7 @@ function tools() {
     { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Call this immediately when the prompt hook supplies a job ID.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "wait_for_claude_worker", title: "Waiting for Claude worker", description: "Wait until a Claude worker finishes, then return its worker result for Codex to verify and synthesize. The inline activity card remains the user-facing progress view.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Waiting for Claude worker", "openai/toolInvocation/invoked": "Claude worker finished" } },
+    { name: "wait_for_claude_worker", title: "Waiting for Claude worker", description: "Wait until a Claude worker finishes or emits a new safe progress message. When state is running and progress_message is present, relay it to the user, then call this tool again. When it finishes, synthesize worker_result.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Waiting for Claude worker", "openai/toolInvocation/invoked": "Claude worker updated" } },
   ];
 }
 
@@ -434,9 +444,13 @@ async function callTool(name, args) {
   if (name === "wait_for_claude_worker") {
     const deadline = Date.now() + ((args.timeout_seconds || 600) * 1000);
     let current = snapshot(jobId);
+    const initialAssistantUpdates = current.assistant_update_count || 0;
     while (!["completed", "failed"].includes(current.state) && Date.now() < deadline) {
       await sleep(750);
       current = snapshot(jobId);
+      if (current.assistant_update_count > initialAssistantUpdates && current.progress_message) {
+        return toolResult({ ...current, worker_result: null, progress_update: true });
+      }
     }
     if (current.state === "completed") {
       const job = readJson(jobPath(jobId));
