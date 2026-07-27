@@ -459,7 +459,7 @@ function tools() {
     { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Call this immediately when the prompt hook supplies a job ID.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "wait_for_claude_worker", title: "Waiting for Claude worker", description: "Wait until a Claude worker finishes or emits a new safe progress message. When state is running and progress_message is present, relay it to the user, then call this tool again. When it finishes, synthesize worker_result.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Waiting for Claude worker", "openai/toolInvocation/invoked": "Claude worker updated" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Wait until a Claude worker finishes or emits a new safe progress message. When state is running and progress_message is present, relay it to the user, then call this tool again. When it finishes, synthesize worker_result.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -470,7 +470,7 @@ async function callTool(name, args) {
   if (name === "show_claude_worker") return toolResult(snapshot(jobId), true);
   if (name === "get_claude_worker_status") return toolResult(snapshot(jobId));
   if (name === "get_claude_worker_activity") return toolResult(snapshot(jobId, true));
-  if (name === "wait_for_claude_worker") {
+  if (name === "claude_is_working" || name === "wait_for_claude_worker") {
     const deadline = Date.now() + ((args.timeout_seconds || 600) * 1000);
     let current = snapshot(jobId);
     const initialAssistantUpdates = current.assistant_update_count || 0;
@@ -498,7 +498,7 @@ async function handle(message) {
   if (!plainObject(message)) return rpcError(null, -32600, "Invalid Request");
   if (typeof message.method !== "string") return rpcError(message.id ?? null, -32600, "Invalid method");
   if (message.method.startsWith("notifications/") || message.method === "$/cancelRequest") return null;
-  if (message.method === "initialize") return rpc(message.id, { protocolVersion: message.params?.protocolVersion || "2024-11-05", capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: SERVER_NAME, title: "Claude worker activity", version: SERVER_VERSION }, instructions: "Use show_claude_worker immediately after the Claude prompt hook provides a job ID, then wait_for_claude_worker before responding." });
+  if (message.method === "initialize") return rpc(message.id, { protocolVersion: message.params?.protocolVersion || "2024-11-05", capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: SERVER_NAME, title: "Claude worker activity", version: SERVER_VERSION }, instructions: "Use show_claude_worker immediately after the Claude prompt hook provides a job ID, then claude_is_working before responding." });
   if (message.method === "ping") return rpc(message.id, {});
   if (message.method === "tools/list") return rpc(message.id, { tools: tools() });
   if (message.method === "tools/call") {
