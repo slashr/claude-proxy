@@ -56,6 +56,14 @@ The marker is intentionally per-prompt. The next normal prompt returns to
 Claude Proxy routing automatically. Use it for Codex-only UI/connectors or a
 small task where delegating to Claude is unnecessary.
 
+## Worker permissions
+
+Claude workers run headlessly with automatic approval enabled so shell-based
+investigations do not stall waiting for an interactive prompt. Read-mode
+workers have an additional Claude `PreToolUse` guard: file-edit tools and
+common destructive or mutating Bash commands are denied. Write-mode workers
+may edit files within the user's explicitly requested scope.
+
 ## Updating
 
 Pull the repository, make the desired source change, validate it, cache-bust,

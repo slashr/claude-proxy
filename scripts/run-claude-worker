@@ -8,6 +8,7 @@ umask 077
 session_dir="$plugin_data_dir/claude-sessions"
 activity_dir="$plugin_data_dir/claude-activity"
 mkdir -p "$session_dir" "$activity_dir"
+plugin_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 job_id=$(jq -er '.job_id' "$job_file")
 codex_session_id=$(jq -er '.codex_session_id' "$job_file")
@@ -16,6 +17,7 @@ worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
 session_file="$session_dir/$codex_session_id"
 session_lock="$session_dir/$codex_session_id.lock"
+worker_settings_file="$session_dir/$codex_session_id.worker-settings.json"
 
 cleanup_lock() {
   if [[ $(cat "$session_lock/job_id" 2>/dev/null || true) == "$job_id" ]]; then
@@ -26,8 +28,8 @@ cleanup_lock() {
 trap cleanup_lock EXIT
 
 case "$worker_mode" in
-  read) permission_mode="plan" ;;
-  write) permission_mode="acceptEdits" ;;
+  read) permission_mode="bypassPermissions" ;;
+  write) permission_mode="bypassPermissions" ;;
   *)
     printf '%s\n' "Unsupported Claude worker mode: $worker_mode" >&2
     exit 2
@@ -83,13 +85,23 @@ if [[ -z "$claude_bin" ]]; then
   exit 127
 fi
 
-claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5)
+if [[ "$worker_mode" == "read" ]]; then
+  jq -n --arg command "$plugin_root/scripts/block-read-worker-tools" \
+    '{hooks:{PreToolUse:[{matcher:"^(Bash|Edit|Write|NotebookEdit)$",hooks:[{type:"command",command:("/bin/bash " + ($command | @sh)),timeout:3}]}]}}' \
+    >"$worker_settings_file.tmp"
+  mv "$worker_settings_file.tmp" "$worker_settings_file"
+fi
+
+claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --dangerously-skip-permissions --model claude-opus-5)
+if [[ "$worker_mode" == "read" ]]; then
+  claude_args+=(--settings "$worker_settings_file")
+fi
 if [[ -s "$session_file" ]]; then
   claude_args+=(--resume "$(<"$session_file")")
 fi
 
 set +e
-"$claude_bin" "${claude_args[@]}" \
+CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${claude_args[@]}" \
   --append-system-prompt "Act as the primary worker for this task. Work in the supplied current directory. The worker mode is $worker_mode: in read mode, use only authorized read-only tools; in write mode, make only file changes that are clearly within the user's request and do not make external-state changes unless explicitly requested. Return concise evidence plus blockers. Codex will verify and present the result. Do not disclose private reasoning; tool calls and concise progress are enough." \
   "$prompt" 2>&1 | tee "$activity_file" >/dev/null
 claude_status=${PIPESTATUS[0]}

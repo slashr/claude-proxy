@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+hook_input=$(cat)
+if [[ "${CLAUDE_WORKER_MODE:-read}" != "read" ]]; then
+  exit 0
+fi
+tool_name=$(printf '%s' "$hook_input" | jq -r '.tool_name // .toolName // empty')
+
+deny() {
+  jq -n --arg reason "$1" \
+    '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}'
+  exit 0
+}
+
+case "$tool_name" in
+  Edit|Write|NotebookEdit)
+    deny "Read-mode Claude workers cannot modify files. Return the requested evidence without editing the workspace."
+    ;;
+  Bash)
+    command=$(printf '%s' "$hook_input" | jq -r '.tool_input.command // .input.command // empty')
+    normalized=$(printf '%s' "$command" | tr '\n' ' ')
+
+    # Keep read mode useful for kubectl/tailscale/git inspection while denying
+    # common filesystem, repository, cluster, and infrastructure mutations.
+    if printf '%s\n' "$normalized" | grep -Eiq '(^|[[:space:];|&()])((sudo[[:space:]]+)?(rm|rmdir|mv|cp|install|touch|truncate|dd|mkfs)([[:space:]]|$)|git[[:space:]]+(reset[[:space:]]+--hard|clean([[:space:]]|$)|checkout[[:space:]]+--|restore[[:space:]]+)|kubectl[[:space:]]+(delete|apply|patch|replace|edit)([[:space:]]|$)|helm[[:space:]]+(install|upgrade|uninstall|delete)([[:space:]]|$)|terraform[[:space:]]+(apply|destroy)([[:space:]]|$)|docker[[:space:]]+(rm|rmi)([[:space:]]|$)|chmod[[:space:]]+-R|chown[[:space:]]+-R)' \
+      || printf '%s\n' "$normalized" | grep -Eiq '(^|[[:space:];|&()])(tee|sed[[:space:]]+-i|perl[[:space:]]+-i)([[:space:]]|$)|>>?[[:space:]]*[^&|]+'
+    then
+      deny "Read-mode Claude workers cannot run destructive or mutating Bash commands. Return read-only evidence instead."
+    fi
+    ;;
+esac
+
+exit 0

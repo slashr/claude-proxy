@@ -218,6 +218,33 @@ function widgetHtml(resourceUri = WIDGET_URI) {
     border-radius: 8px;
     background: transparent;
   }
+  #claude-worker-card .transcript .entry {
+    border: 0;
+    border-top: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+    border-radius: 0;
+    padding: 5px 0;
+  }
+  #claude-worker-card .tool-summary {
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 0 8px;
+  }
+  #claude-worker-card .tool-summary > .tool-title { grid-column: 1; grid-row: 1; }
+  #claude-worker-card .tool-summary > .tool-preview {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+  }
+  #claude-worker-card .tool-summary > .outcome { grid-column: 3; grid-row: 1; }
+  #claude-worker-card .tool-summary > .tool-hint { display: none; }
+  #claude-worker-card .tool-summary::after {
+    grid-column: 4;
+    grid-row: 1;
+    content: "Show";
+    font-size: 11px;
+    opacity: .56;
+  }
+  #claude-worker-card details.entry.tool[open] .tool-summary::after { content: "Hide"; }
   #claude-worker-card .entry-head { font-size: 12px; line-height: 16px; margin-bottom: 3px; }
   #claude-worker-card .entry pre { margin-top: 4px; font-size: 10px; }
   #claude-worker-card .tool-body { padding: 0 9px 8px; }
@@ -282,12 +309,12 @@ function widgetHtml(resourceUri = WIDGET_URI) {
     const transcriptEntries = data.transcript || [];
     transcript.replaceChildren(...transcriptEntries.map(entry => {
       if (entry.kind === "tool") {
-        const item = document.createElement("details"); item.className = "entry tool";
+        const item = document.createElement("details"); item.className = "entry tool " + (entry.status || "running");
         const summary = document.createElement("summary"); summary.className = "tool-summary";
         const title = document.createElement("span"); title.className = "tool-title"; title.textContent = entry.label || "Tool";
         const outcome = document.createElement("span"); outcome.className = "outcome"; outcome.textContent = entry.status || "running";
         const source = entry.output || entry.input || "No output reported yet";
-        const preview = document.createElement("span"); preview.className = "tool-preview"; preview.textContent = source.replace(/\s+/g, " ").slice(0, 150);
+        const preview = document.createElement("span"); preview.className = "tool-preview"; preview.textContent = source.slice(0, 150);
         const hint = document.createElement("span"); hint.className = "tool-hint"; hint.textContent = "Expand";
         summary.append(title, outcome, preview, hint); item.append(summary);
         const body = document.createElement("div"); body.className = "tool-body";
@@ -367,7 +394,7 @@ function tools() {
     { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Call this immediately when the prompt hook supplies a job ID.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "wait_for_claude_worker", title: "Wait for Claude worker", description: "Wait until a Claude worker finishes, then return its worker result for Codex to verify and synthesize. The inline activity card remains the user-facing progress view.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true } },
+    { name: "wait_for_claude_worker", title: "Waiting for Claude worker", description: "Wait until a Claude worker finishes, then return its worker result for Codex to verify and synthesize. The inline activity card remains the user-facing progress view.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Waiting for Claude worker", "openai/toolInvocation/invoked": "Claude worker finished" } },
   ];
 }
 
