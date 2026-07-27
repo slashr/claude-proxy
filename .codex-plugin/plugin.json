@@ -1,6 +1,6 @@
 {
   "name": "claude-proxy",
-  "version": "0.1.0+codex.20260727191450",
+  "version": "0.1.0+codex.20260727191928",
   "description": "Runs Claude Code workers with a live inline activity view in ChatGPT desktop.",
   "author": {
     "name": "Akash"

@@ -47,8 +47,8 @@ job_file="$job_dir/$job_id.json"
 
 # File changes need an explicit user request. Keep read-only investigations,
 # explanations, and reviews in read mode; use write mode for implementation and
-# PR workflows. The worker runs headlessly with automatic approval, while
-# read-mode jobs add a worker-side guard for edits and common destructive Bash.
+# PR workflows. The worker runs headlessly with Claude's automatic approval in
+# both modes.
 worker_mode="read"
 prompt_for_mode=$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')
 if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe|commit|push|publish)([^[:alpha:]]|$) \

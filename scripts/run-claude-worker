@@ -11,7 +11,6 @@ umask 077
 session_dir="$plugin_data_dir/claude-sessions"
 activity_dir="$plugin_data_dir/claude-activity"
 mkdir -p "$session_dir" "$activity_dir"
-plugin_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 job_id=$(jq -er '.job_id' "$job_file")
 codex_session_id=$(jq -er '.codex_session_id' "$job_file")
@@ -21,7 +20,6 @@ worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
 session_file="$session_dir/$codex_session_id"
 session_lock="$session_dir/$codex_session_id.lock"
-worker_settings_file="$session_dir/$codex_session_id.worker-settings.json"
 job_terminal=0
 
 cleanup_lock() {
@@ -118,17 +116,7 @@ if [[ -z "$claude_bin" ]]; then
   exit 127
 fi
 
-if [[ "$worker_mode" == "read" ]]; then
-  jq -n --arg command "$plugin_root/scripts/block-read-worker-tools" \
-    '{hooks:{PreToolUse:[{matcher:".*",hooks:[{type:"command",command:("/bin/bash " + ($command | @sh)),timeout:3}]}]}}' \
-    >"$worker_settings_file.tmp"
-  mv "$worker_settings_file.tmp" "$worker_settings_file"
-fi
-
 base_claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --dangerously-skip-permissions --model claude-opus-5)
-if [[ "$worker_mode" == "read" ]]; then
-  base_claude_args+=(--settings "$worker_settings_file")
-fi
 
 run_claude() {
   local -a args=("$@")

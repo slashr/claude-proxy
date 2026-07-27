@@ -65,14 +65,12 @@ small task where delegating to Claude is unnecessary.
 
 ## Worker permissions
 
-Claude workers run headlessly with automatic approval enabled so shell-based
-investigations and PR workflows do not stall waiting for an interactive
-prompt. Read-mode workers have an additional Claude `PreToolUse` guard:
-file-edit tools and common destructive or mutating Bash commands are denied.
-Write-mode workers may edit files and run the requested Git/PR workflow.
-Worker polling is bounded below the desktop host timeout, stale Claude session
-IDs are retried from a fresh session, and unexpected worker exits finalize as
-failed jobs instead of remaining permanently running.
+Claude workers run headlessly with automatic approval enabled in both read and
+write modes, so Claude can perform the requested shell, file, and PR work
+without an interactive prompt. Worker polling is bounded below the desktop
+host timeout, stale Claude session IDs are retried from a fresh session, and
+unexpected worker exits finalize as failed jobs instead of remaining
+permanently running.
 
 ## Updating
 
