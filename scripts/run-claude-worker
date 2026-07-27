@@ -11,7 +11,6 @@ umask 077
 session_dir="$plugin_data_dir/claude-sessions"
 activity_dir="$plugin_data_dir/claude-activity"
 mkdir -p "$session_dir" "$activity_dir"
-plugin_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 job_id=$(jq -er '.job_id' "$job_file")
 codex_session_id=$(jq -er '.codex_session_id' "$job_file")
@@ -21,7 +20,7 @@ worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
 session_file="$session_dir/$codex_session_id"
 session_lock="$session_dir/$codex_session_id.lock"
-worker_settings_file="$session_dir/$codex_session_id.worker-settings.json"
+job_terminal=0
 
 cleanup_lock() {
   if [[ $(cat "$session_lock/job_id" 2>/dev/null || true) == "$job_id" ]]; then
@@ -29,7 +28,6 @@ cleanup_lock() {
     rmdir "$session_lock" 2>/dev/null || true
   fi
 }
-trap cleanup_lock EXIT
 
 case "$worker_mode" in
   read|write) permission_mode="auto" ;;
@@ -45,7 +43,13 @@ write_job() {
   local result=${3:-}
   local claude_session=${4:-}
   local summary=${5:-}
+  local exit_code=${6:-null}
+  local finished_at=null
   local temporary="$job_file.tmp"
+  if [[ "$state" == "completed" || "$state" == "failed" ]]; then
+    finished_at=$(date +%s)
+    job_terminal=1
+  fi
   jq -n \
     --arg job_id "$job_id" \
     --arg codex_session_id "$codex_session_id" \
@@ -59,15 +63,28 @@ write_job() {
     --arg tool_summary "$summary" \
     --argjson started_at "$(jq -r '.started_at' "$job_file")" \
     --argjson updated_at "$(date +%s)" \
-    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,working_dir:$working_dir,worker_mode:$worker_mode,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at}' >"$temporary"
+    --argjson finished_at "$finished_at" \
+    --argjson exit_code "$exit_code" \
+    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,working_dir:$working_dir,worker_mode:$worker_mode,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at,finished_at:$finished_at,exit_code:$exit_code}' >"$temporary"
   mv "$temporary" "$job_file"
 }
+
+finalize_unexpected_exit() {
+  local status=$?
+  if [[ $job_terminal -eq 0 ]]; then
+    write_job "failed" "Claude worker exited unexpectedly (status $status)." "" "" "No Claude tool calls reported." "$status" || true
+  fi
+  cleanup_lock
+  trap - EXIT
+  exit "$status"
+}
+trap finalize_unexpected_exit EXIT
 
 # launchctl workers otherwise start in `/`, which prevents Claude Code from
 # resolving the task's project memory and instruction files. Do not silently
 # fall back there: a missing workspace is a failed job, not a valid project.
 if [[ -z "$working_dir" || ! -d "$working_dir" ]]; then
-  write_job "failed" "Claude worker workspace is missing or unavailable." "" "" "No Claude tool calls reported."
+  write_job "failed" "Claude worker workspace is missing or unavailable." "" "" "No Claude tool calls reported." 2
   exit 2
 fi
 working_dir=$(cd "$working_dir" && pwd -P)
@@ -95,45 +112,51 @@ if [[ -z "$claude_bin" && -x "${HOME:-}/.local/bin/claude" ]]; then
   claude_bin="${HOME}/.local/bin/claude"
 fi
 if [[ -z "$claude_bin" ]]; then
-  write_job "failed" "Claude CLI is unavailable to the worker." "" "" "No Claude tool calls reported."
+  write_job "failed" "Claude CLI is unavailable to the worker." "" "" "No Claude tool calls reported." 127
   exit 127
 fi
 
-if [[ "$worker_mode" == "read" ]]; then
-  jq -n --arg command "$plugin_root/scripts/block-read-worker-tools" \
-    '{hooks:{PreToolUse:[{matcher:".*",hooks:[{type:"command",command:("/bin/bash " + ($command | @sh)),timeout:3}]}]}}' \
-    >"$worker_settings_file.tmp"
-  mv "$worker_settings_file.tmp" "$worker_settings_file"
-fi
+base_claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5)
 
-claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5)
-if [[ "$worker_mode" == "read" ]]; then
-  claude_args+=(--settings "$worker_settings_file")
-fi
+run_claude() {
+  local -a args=("$@")
+  : >"$activity_file"
+  set +e
+  CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${args[@]}" \
+    "$prompt" 2>&1 | tee "$activity_file" >/dev/null
+  claude_status=${PIPESTATUS[0]}
+  set -e
+}
+
+claude_args=("${base_claude_args[@]}")
 if [[ -s "$session_file" ]]; then
   claude_args+=(--resume "$(<"$session_file")")
+  run_claude "${claude_args[@]}"
+  if [[ $claude_status -ne 0 ]] && grep -Eiq 'No conversation found with session ID|session[^[:alnum:]]+(not found|does not exist)' "$activity_file"; then
+    rm -f "$session_file"
+    claude_args=("${base_claude_args[@]}")
+    run_claude "${claude_args[@]}"
+  fi
+else
+  run_claude "${claude_args[@]}"
 fi
-
-set +e
-CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${claude_args[@]}" \
-  "$prompt" 2>&1 | tee "$activity_file" >/dev/null
-claude_status=${PIPESTATUS[0]}
-set -e
 
 summary=$(safe_summary)
 result_event=$(jq -se '[.[] | select(.type == "result")] | last' "$activity_file" 2>/dev/null || true)
 if [[ $claude_status -ne 0 || -z "$result_event" || "$result_event" == "null" ]]; then
+  failure_status=$claude_status
+  if [[ $failure_status -eq 0 ]]; then failure_status=1; fi
   retry_error=$(jq -r 'select(.type == "system" and .subtype == "api_retry") | .error' "$activity_file" 2>/dev/null | tail -1)
   if [[ -n "$retry_error" ]]; then
-    write_job "failed" "Claude worker failed after provider retries: $retry_error." "" "" "$summary"
+    write_job "failed" "Claude worker failed after provider retries: $retry_error." "" "" "$summary" "$failure_status"
   else
-    write_job "failed" "Claude worker exited before returning a result." "" "" "$summary"
+    write_job "failed" "Claude worker exited before returning a result." "" "" "$summary" "$failure_status"
   fi
-  exit "$claude_status"
+  exit "$failure_status"
 fi
 
 if [[ $(jq -r '.is_error // false' <<<"$result_event") == "true" ]]; then
-  write_job "failed" "Claude returned an error result." "" "" "$summary"
+  write_job "failed" "Claude returned an error result." "" "" "$summary" 1
   exit 1
 fi
 
