@@ -9,6 +9,13 @@ or activity logs.
 Run these commands as the account that uses the ChatGPT desktop app. The
 example below assumes this repository was cloned to `~/Code/claude-plugin`.
 
+The public source repository is [github.com/slashr/claude-proxy](https://github.com/slashr/claude-proxy),
+so another macOS account can clone it without GitHub credentials:
+
+```bash
+git clone https://github.com/slashr/claude-proxy.git ~/Code/claude-plugin
+```
+
 ```bash
 mkdir -p ~/plugins
 ln -sfn ~/Code/claude-plugin ~/plugins/claude-proxy
@@ -91,4 +98,7 @@ git add .
 git commit -m "Add Claude Proxy plugin"
 ```
 
-Push it to a private repository before using it across personal accounts.
+Push it to the public repository when sharing the source across macOS
+accounts. This GitHub repository is separate from the OpenAI universal plugin
+directory; each account still installs the local plugin and authenticates its
+own Claude Code CLI session.
