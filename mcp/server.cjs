@@ -217,6 +217,31 @@ function widgetHtml(resourceUri = WIDGET_URI) {
     line-height: 18px;
   }
   #claude-worker-card .content { padding: 0; }
+  #claude-worker-card .activity-summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    list-style: none;
+  }
+  #claude-worker-card .activity-summary::-webkit-details-marker { display: none; }
+  #claude-worker-card .activity-summary .brand { min-width: 0; }
+  #claude-worker-card .activity-phase {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: .65;
+    font-size: 12px;
+  }
+  #claude-worker-card .activity-summary::after {
+    content: "Show";
+    font-size: 11px;
+    opacity: .56;
+  }
+  #claude-worker-card details.activity[open] .activity-summary::after { content: "Hide"; }
+  #claude-worker-card .activity-body { padding-top: 10px; }
   #claude-worker-card .mark { width: 20px; height: 20px; border-radius: 6px; font-size: 12px; }
   #claude-worker-card .state { padding: 2px 8px; font-size: 11px; }
   #claude-worker-card .tool-summary { gap: 6px; margin-top: 6px; padding: 7px 9px; }
@@ -287,19 +312,22 @@ function widgetHtml(resourceUri = WIDGET_URI) {
   #claude-worker-card .notice { padding: 8px 0 0; font-size: 11px; background: transparent; }
 </style>
 <section id="claude-worker-card" aria-live="polite">
-  <div class="content">
-    <div class="head"><div class="brand"><span class="mark">✦</span><span>Claude worker</span></div><span id="state" class="state">Connecting</span></div>
-    <div id="phase" class="phase">Connecting to worker…</div>
-    <p id="detail" class="detail">Loading safe activity…</p>
-    <div id="stats" class="stats"></div>
-    <ol id="timeline" class="timeline"><li class="empty">Waiting for the first public activity update…</li></ol>
-    <ol id="transcript" class="transcript"></ol>
-  </div>
-  <div class="notice">Streaming Claude activity. Credentials are redacted before rendering.</div>
+  <details class="activity">
+    <summary class="activity-summary"><div class="brand"><span class="mark">✦</span><span>Claude worker</span></div><span id="activity-phase" class="activity-phase">Connecting to worker…</span><span id="state" class="state">Connecting</span></summary>
+    <div class="content activity-body">
+      <div id="phase" class="phase">Connecting to worker…</div>
+      <p id="detail" class="detail">Loading safe activity…</p>
+      <div id="stats" class="stats"></div>
+      <ol id="timeline" class="timeline"><li class="empty">Waiting for the first public activity update…</li></ol>
+      <ol id="transcript" class="transcript"></ol>
+    </div>
+    <div class="notice">Streaming Claude activity. Credentials are redacted before rendering.</div>
+  </details>
 </section>
 <script type="module">
 (() => {
   const state = document.getElementById("state");
+  const activityPhase = document.getElementById("activity-phase");
   const phase = document.getElementById("phase");
   const detail = document.getElementById("detail");
   const stats = document.getElementById("stats");
@@ -323,6 +351,7 @@ function widgetHtml(resourceUri = WIDGET_URI) {
     state.textContent = currentState;
     state.className = "state " + currentState;
     phase.textContent = data.phase || "Claude worker is running";
+    activityPhase.textContent = data.phase || "Claude worker is running";
     detail.textContent = data.detail || "Claude worker is running.";
     detail.className = "detail" + (data.retry_error ? " warn" : "");
     const bits = [];
