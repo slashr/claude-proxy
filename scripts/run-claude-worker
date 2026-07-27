@@ -3,6 +3,9 @@ set -euo pipefail
 
 job_file=${1:?job file is required}
 plugin_data_dir=${2:?plugin data directory is required}
+job_file_dir=$(cd "$(dirname "$job_file")" && pwd -P)
+job_file="$job_file_dir/$(basename "$job_file")"
+plugin_data_dir=$(cd "$plugin_data_dir" && pwd -P)
 
 umask 077
 session_dir="$plugin_data_dir/claude-sessions"
@@ -13,7 +16,7 @@ plugin_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 job_id=$(jq -er '.job_id' "$job_file")
 codex_session_id=$(jq -er '.codex_session_id' "$job_file")
 prompt=$(jq -er '.prompt' "$job_file")
-working_dir=$(jq -r '.working_dir // "/"' "$job_file")
+working_dir=$(jq -r '.working_dir // empty' "$job_file")
 worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
 session_file="$session_dir/$codex_session_id"
@@ -28,16 +31,8 @@ cleanup_lock() {
 }
 trap cleanup_lock EXIT
 
-# launchctl workers otherwise start in `/`, which prevents Claude Code from
-# resolving the task's project memory and instruction files.
-if [[ ! -d "$working_dir" ]]; then
-  working_dir="/"
-fi
-cd "$working_dir"
-
 case "$worker_mode" in
-  read) permission_mode="bypassPermissions" ;;
-  write) permission_mode="bypassPermissions" ;;
+  read|write) permission_mode="auto" ;;
   *)
     printf '%s\n' "Unsupported Claude worker mode: $worker_mode" >&2
     exit 2
@@ -68,6 +63,16 @@ write_job() {
   mv "$temporary" "$job_file"
 }
 
+# launchctl workers otherwise start in `/`, which prevents Claude Code from
+# resolving the task's project memory and instruction files. Do not silently
+# fall back there: a missing workspace is a failed job, not a valid project.
+if [[ -z "$working_dir" || ! -d "$working_dir" ]]; then
+  write_job "failed" "Claude worker workspace is missing or unavailable." "" "" "No Claude tool calls reported."
+  exit 2
+fi
+working_dir=$(cd "$working_dir" && pwd -P)
+cd "$working_dir"
+
 safe_summary() {
   jq -rs '
     [ .[]
@@ -96,12 +101,12 @@ fi
 
 if [[ "$worker_mode" == "read" ]]; then
   jq -n --arg command "$plugin_root/scripts/block-read-worker-tools" \
-    '{hooks:{PreToolUse:[{matcher:"^(Bash|Edit|Write|NotebookEdit)$",hooks:[{type:"command",command:("/bin/bash " + ($command | @sh)),timeout:3}]}]}}' \
+    '{hooks:{PreToolUse:[{matcher:".*",hooks:[{type:"command",command:("/bin/bash " + ($command | @sh)),timeout:3}]}]}}' \
     >"$worker_settings_file.tmp"
   mv "$worker_settings_file.tmp" "$worker_settings_file"
 fi
 
-claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --dangerously-skip-permissions --model claude-opus-5)
+claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5)
 if [[ "$worker_mode" == "read" ]]; then
   claude_args+=(--settings "$worker_settings_file")
 fi

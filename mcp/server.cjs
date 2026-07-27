@@ -13,6 +13,9 @@ const WIDGET_URI = `ui://claude-proxy/activity-${encodeURIComponent(SERVER_VERSI
 const WIDGET_MIME = "text/html;profile=mcp-app";
 const DATA_DIR = process.env.PLUGIN_DATA || path.join(os.homedir(), ".codex", "plugins", "data", "claude-proxy-personal");
 const JOB_DIR = path.join(DATA_DIR, "claude-jobs");
+const PROGRESS_RELAY_MIN_INTERVAL_MS = 3000;
+const WORKER_MAX_WAIT_MS = 600000;
+const lastProgressRelay = new Map();
 
 function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -38,8 +41,9 @@ function safeText(value, limit = 80) {
 function redact(value) {
   return String(value || "")
     .replace(/-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----/g, "[redacted private key]")
-    .replace(/\b(?:Bearer\s+)?(?:ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b/g, "[redacted credential]")
-    .replace(/\b(ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|password|token)\s*[=:]\s*[^\s'\"]+/gi, "$1=[redacted]");
+    .replace(/\b(?:Bearer\s+)?(?:ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|xox[a-zA-Z]-[A-Za-z0-9-]+|tskey-[A-Za-z0-9_-]+|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g, "[redacted credential]")
+    .replace(/\b(https?:\/\/)[^\s\/@:]+:[^\s\/@]+@/gi, "$1[redacted credentials]@")
+    .replace(/\b(ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|password|token|access-token|client-certificate-data|client-key-data|certificate-authority-data)\s*[=:]\s*[^\s'\"]+/gi, "$1=[redacted]");
 }
 
 function preview(value, limit) {
@@ -462,7 +466,7 @@ function tools() {
     { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Use only when the user explicitly asks to inspect activity.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "claude_is_working", title: "Claude is working…", description: "Wait until a Claude worker finishes or emits a new safe progress message. When state is running and progress_message is present, relay it to the user, then call this tool again. When it finishes, synthesize worker_result.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Wait until a Claude worker finishes or emits a safe, rate-limited progress message. When state is running and progress_message is present, relay it to the user, then call this tool again. When it finishes, synthesize worker_result. Total wait time is capped at 10 minutes from worker start.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -474,21 +478,31 @@ async function callTool(name, args) {
   if (name === "get_claude_worker_status") return toolResult(snapshot(jobId));
   if (name === "get_claude_worker_activity") return toolResult(snapshot(jobId, true));
   if (name === "claude_is_working" || name === "wait_for_claude_worker") {
-    const deadline = Date.now() + ((args.timeout_seconds || 600) * 1000);
     let current = snapshot(jobId);
+    const requestedDeadline = Date.now() + ((args.timeout_seconds || 600) * 1000);
+    const workerDeadline = current.started_at ? (current.started_at * 1000) + WORKER_MAX_WAIT_MS : requestedDeadline;
+    const deadline = Math.min(requestedDeadline, workerDeadline);
     const initialAssistantUpdates = current.assistant_update_count || 0;
     while (!["completed", "failed"].includes(current.state) && Date.now() < deadline) {
       await sleep(750);
       current = snapshot(jobId);
-      if (current.assistant_update_count > initialAssistantUpdates && current.progress_message) {
+      if (["completed", "failed"].includes(current.state)) break;
+      const previousRelay = lastProgressRelay.get(jobId);
+      const mayRelay = !previousRelay || (Date.now() - previousRelay.at) >= PROGRESS_RELAY_MIN_INTERVAL_MS;
+      if (mayRelay && current.assistant_update_count > initialAssistantUpdates && current.progress_message) {
+        lastProgressRelay.set(jobId, { at: Date.now(), assistantUpdates: current.assistant_update_count });
         return toolResult({ ...current, worker_result: null, progress_update: true });
       }
     }
     if (current.state === "completed") {
+      lastProgressRelay.delete(jobId);
       const job = readJson(jobPath(jobId));
       return toolResult({ ...current, worker_result: job.result, claude_session_id: job.claude_session_id });
     }
-    if (current.state === "failed") return toolResult({ ...current, worker_result: null });
+    if (current.state === "failed") {
+      lastProgressRelay.delete(jobId);
+      return toolResult({ ...current, worker_result: null });
+    }
     return toolResult({ ...current, timed_out: true, worker_result: null });
   }
   throw new Error(`unknown tool: ${name}`);

@@ -5,7 +5,7 @@ hook_input=$(cat)
 prompt=$(printf '%s' "$hook_input" | jq -er '.prompt')
 codex_session_id=$(printf '%s' "$hook_input" | jq -er '.session_id')
 # Codex provides its workspace as `cwd`. Keep compatibility with older hook
-# payloads and fall back to this hook's own directory when it is absent.
+# payloads and fall back to the hook process's current directory when it is absent.
 working_dir=$(printf '%s' "$hook_input" | jq -r '.cwd // .working_directory // .workspace_root // empty')
 if [[ -z "$working_dir" || ! -d "$working_dir" ]]; then
   working_dir=$(pwd -P)
