@@ -11,7 +11,11 @@ const SERVER_NAME = "claude-proxy-activity";
 const SERVER_VERSION = manifest.version;
 const WIDGET_URI = `ui://claude-proxy/activity-${encodeURIComponent(SERVER_VERSION)}.html`;
 const WIDGET_MIME = "text/html;profile=mcp-app";
-const DATA_DIR = process.env.PLUGIN_DATA || path.join(os.homedir(), ".codex", "plugins", "data", "claude-proxy-personal");
+const PLUGIN_NAME = typeof manifest.name === "string" && manifest.name ? manifest.name : path.basename(PLUGIN_ROOT);
+const MARKETPLACE = path.basename(path.resolve(PLUGIN_ROOT, "..", ".."));
+const DATA_DIR = process.env.PLUGIN_DATA
+  || process.env.CLAUDE_PLUGIN_DATA
+  || path.join(os.homedir(), ".codex", "plugins", "data", `${PLUGIN_NAME}-${MARKETPLACE}`);
 const JOB_DIR = path.join(DATA_DIR, "claude-jobs");
 const PROGRESS_RELAY_MIN_INTERVAL_MS = 3000;
 const WORKER_MAX_WAIT_MS = 600000;
@@ -139,8 +143,9 @@ function activityDetails(activityFile) {
 }
 
 function snapshot(jobId, rich = false) {
-  const job = readJson(jobPath(jobId));
-  if (!job) throw new Error("worker job was not found");
+  const resolvedJobPath = jobPath(jobId);
+  const job = readJson(resolvedJobPath);
+  if (!job) throw new Error(`worker job was not found: ${resolvedJobPath}`);
   const activity = activityDetails(job.activity_file || path.join(DATA_DIR, "claude-activity", `${jobId}.jsonl`));
   const state = job.state || "queued";
   const terminal = ["completed", "failed"].includes(state);
