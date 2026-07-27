@@ -3,6 +3,9 @@ set -euo pipefail
 
 job_file=${1:?job file is required}
 plugin_data_dir=${2:?plugin data directory is required}
+job_file_dir=$(cd "$(dirname "$job_file")" && pwd -P)
+job_file="$job_file_dir/$(basename "$job_file")"
+plugin_data_dir=$(cd "$plugin_data_dir" && pwd -P)
 
 umask 077
 session_dir="$plugin_data_dir/claude-sessions"
@@ -13,6 +16,7 @@ plugin_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 job_id=$(jq -er '.job_id' "$job_file")
 codex_session_id=$(jq -er '.codex_session_id' "$job_file")
 prompt=$(jq -er '.prompt' "$job_file")
+working_dir=$(jq -r '.working_dir // empty' "$job_file")
 worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
 session_file="$session_dir/$codex_session_id"
@@ -28,8 +32,7 @@ cleanup_lock() {
 trap cleanup_lock EXIT
 
 case "$worker_mode" in
-  read) permission_mode="bypassPermissions" ;;
-  write) permission_mode="bypassPermissions" ;;
+  read|write) permission_mode="auto" ;;
   *)
     printf '%s\n' "Unsupported Claude worker mode: $worker_mode" >&2
     exit 2
@@ -47,6 +50,7 @@ write_job() {
     --arg job_id "$job_id" \
     --arg codex_session_id "$codex_session_id" \
     --arg activity_file "$activity_file" \
+    --arg working_dir "$working_dir" \
     --arg worker_mode "$worker_mode" \
     --arg state "$state" \
     --arg detail "$detail" \
@@ -55,9 +59,19 @@ write_job() {
     --arg tool_summary "$summary" \
     --argjson started_at "$(jq -r '.started_at' "$job_file")" \
     --argjson updated_at "$(date +%s)" \
-    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,worker_mode:$worker_mode,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at}' >"$temporary"
+    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,working_dir:$working_dir,worker_mode:$worker_mode,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at}' >"$temporary"
   mv "$temporary" "$job_file"
 }
+
+# launchctl workers otherwise start in `/`, which prevents Claude Code from
+# resolving the task's project memory and instruction files. Do not silently
+# fall back there: a missing workspace is a failed job, not a valid project.
+if [[ -z "$working_dir" || ! -d "$working_dir" ]]; then
+  write_job "failed" "Claude worker workspace is missing or unavailable." "" "" "No Claude tool calls reported."
+  exit 2
+fi
+working_dir=$(cd "$working_dir" && pwd -P)
+cd "$working_dir"
 
 safe_summary() {
   jq -rs '
@@ -87,12 +101,12 @@ fi
 
 if [[ "$worker_mode" == "read" ]]; then
   jq -n --arg command "$plugin_root/scripts/block-read-worker-tools" \
-    '{hooks:{PreToolUse:[{matcher:"^(Bash|Edit|Write|NotebookEdit)$",hooks:[{type:"command",command:("/bin/bash " + ($command | @sh)),timeout:3}]}]}}' \
+    '{hooks:{PreToolUse:[{matcher:".*",hooks:[{type:"command",command:("/bin/bash " + ($command | @sh)),timeout:3}]}]}}' \
     >"$worker_settings_file.tmp"
   mv "$worker_settings_file.tmp" "$worker_settings_file"
 fi
 
-claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --dangerously-skip-permissions --model claude-opus-5)
+claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5)
 if [[ "$worker_mode" == "read" ]]; then
   claude_args+=(--settings "$worker_settings_file")
 fi
@@ -102,7 +116,6 @@ fi
 
 set +e
 CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${claude_args[@]}" \
-  --append-system-prompt "Act as the primary worker for this task. Work in the supplied current directory. The worker mode is $worker_mode: in read mode, use only authorized read-only tools; in write mode, make only file changes that are clearly within the user's request and do not make external-state changes unless explicitly requested. Return concise evidence plus blockers. Codex will verify and present the result. Do not disclose private reasoning; tool calls and concise progress are enough." \
   "$prompt" 2>&1 | tee "$activity_file" >/dev/null
 claude_status=${PIPESTATUS[0]}
 set -e

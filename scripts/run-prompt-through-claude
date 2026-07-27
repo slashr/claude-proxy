@@ -4,6 +4,12 @@ set -euo pipefail
 hook_input=$(cat)
 prompt=$(printf '%s' "$hook_input" | jq -er '.prompt')
 codex_session_id=$(printf '%s' "$hook_input" | jq -er '.session_id')
+# Codex provides its workspace as `cwd`. Keep compatibility with older hook
+# payloads and fall back to the hook process's current directory when it is absent.
+working_dir=$(printf '%s' "$hook_input" | jq -r '.cwd // .working_directory // .workspace_root // empty')
+if [[ -z "$working_dir" || ! -d "$working_dir" ]]; then
+  working_dir=$(pwd -P)
+fi
 plugin_data_dir=${PLUGIN_DATA:-${CLAUDE_PLUGIN_DATA:-}}
 if [[ -z "$plugin_data_dir" ]]; then
   printf '%s\n' 'Claude proxy requires PLUGIN_DATA or CLAUDE_PLUGIN_DATA.' >&2
@@ -45,7 +51,8 @@ job_file="$job_dir/$job_id.json"
 # Claude still has its normal command and external-state safeguards.
 worker_mode="read"
 prompt_for_mode=$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')
-if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe)([^[:alpha:]]|$) ]]; then
+if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe|commit|push|publish)([^[:alpha:]]|$) \
+  || "$prompt_for_mode" =~ (open|submit)[[:space:]]+(a[[:space:]]+)?(pull[[:space:]]+request|pr) ]]; then
   worker_mode="write"
 fi
 
@@ -53,9 +60,10 @@ jq -n \
   --arg job_id "$job_id" \
   --arg codex_session_id "$codex_session_id" \
   --arg prompt "$prompt" \
+  --arg working_dir "$working_dir" \
   --arg worker_mode "$worker_mode" \
   --argjson started_at "$(date +%s)" \
-  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,worker_mode:$worker_mode,state:"queued",started_at:$started_at}' >"$job_file"
+  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,working_dir:$working_dir,worker_mode:$worker_mode,state:"queued",started_at:$started_at}' >"$job_file"
 
 # One Claude session must have one active worker. Concurrent --resume calls
 # race the session transcript and can leave the activity card permanently stale.
@@ -65,7 +73,7 @@ if ! mkdir "$session_lock" 2>/dev/null; then
   active_state=$(jq -r '.state // empty' "$active_file" 2>/dev/null || true)
   if [[ "$active_state" == "queued" || "$active_state" == "running" ]]; then
     rm -f "$job_file"
-    jq -n --arg job_id "$active_job" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker is already running for this task. Do not start another worker; call `show_claude_worker` and `wait_for_claude_worker` with job_id `" + $job_id + "`.")}}'
+    jq -n --arg job_id "$active_job" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker is already running for this task. Do not start another worker; call `claude_is_working` with job_id `" + $job_id + "`. Do not call `show_claude_worker` unless the user explicitly asks to inspect the activity card. If it returns state `running` with progress_message, relay that message once as concise user-facing progress, then call `claude_is_working` again. When it finishes, synthesize worker_result.")}}'
     exit 0
   fi
   rm -f "$session_lock/job_id"
@@ -85,4 +93,4 @@ if ! /bin/launchctl submit -l "$launch_label" \
   exit 1
 fi
 
-jq -n --arg job_id "$job_id" --arg worker_mode "$worker_mode" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker was started asynchronously in " + $worker_mode + " mode. Immediately call the available Claude worker activity tool `show_claude_worker` with job_id `" + $job_id + "` so the user receives the live inline status card. Then call `wait_for_claude_worker` with the same job_id and synthesize its worker result in Codex voice. Do not use direct Codex shell commands for the task. The activity card may show safe status and tool names, never private reasoning or raw tool inputs.")}}'
+jq -n --arg job_id "$job_id" --arg worker_mode "$worker_mode" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker was started asynchronously in " + $worker_mode + " mode. Call `claude_is_working` with job_id `" + $job_id + "`. Do not call `show_claude_worker` unless the user explicitly asks to inspect the activity card; keeping it closed avoids a large empty widget. If it returns state `running` with progress_message, relay that message once as concise user-facing progress (without tool inputs, raw thinking, or generic waiting text), then call `claude_is_working` again. Repeat until it finishes; then synthesize worker_result in Codex voice. Do not use direct Codex shell commands for the task. The activity card may show safe status and tool names, never private reasoning or raw tool inputs.")}}'

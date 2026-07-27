@@ -14,6 +14,8 @@ deny() {
 }
 
 case "$tool_name" in
+  Read|Glob|Grep|WebFetch|WebSearch)
+    ;;
   Edit|Write|NotebookEdit)
     deny "Read-mode Claude workers cannot modify files. Return the requested evidence without editing the workspace."
     ;;
@@ -21,13 +23,18 @@ case "$tool_name" in
     command=$(printf '%s' "$hook_input" | jq -r '.tool_input.command // .input.command // empty')
     normalized=$(printf '%s' "$command" | tr '\n' ' ')
 
-    # Keep read mode useful for kubectl/tailscale/git inspection while denying
-    # common filesystem, repository, cluster, and infrastructure mutations.
-    if printf '%s\n' "$normalized" | grep -Eiq '(^|[[:space:];|&()])((sudo[[:space:]]+)?(rm|rmdir|mv|cp|install|touch|truncate|dd|mkfs)([[:space:]]|$)|git[[:space:]]+(reset[[:space:]]+--hard|clean([[:space:]]|$)|checkout[[:space:]]+--|restore[[:space:]]+)|kubectl[[:space:]]+(delete|apply|patch|replace|edit)([[:space:]]|$)|helm[[:space:]]+(install|upgrade|uninstall|delete)([[:space:]]|$)|terraform[[:space:]]+(apply|destroy)([[:space:]]|$)|docker[[:space:]]+(rm|rmi)([[:space:]]|$)|chmod[[:space:]]+-R|chown[[:space:]]+-R)' \
-      || printf '%s\n' "$normalized" | grep -Eiq '(^|[[:space:];|&()])(tee|sed[[:space:]]+-i|perl[[:space:]]+-i)([[:space:]]|$)|>>?[[:space:]]*[^&|]+'
+    # Keep read mode useful for inspection while denying known repository,
+    # cluster, HTTP, filesystem, and infrastructure mutations. Read workers
+    # also use Claude's auto permission mode; this hook is a second layer.
+    if printf '%s\n' "$normalized" | grep -Eiq '(^|[[:space:];|&()])((sudo[[:space:]]+)?(rm|rmdir|mv|cp|install|touch|truncate|dd|mkfs)([[:space:]]|$)|git[[:space:]]+(push|reset[[:space:]]+--hard|clean([[:space:]]|$)|checkout[[:space:]]+--|restore[[:space:]]+)|gh[[:space:]]+(pr[[:space:]]+merge|repo[[:space:]]+(delete|archive)|issue[[:space:]]+(close|delete))([[:space:]]|$)|kubectl[[:space:]]+(delete|apply|patch|replace|edit|create|scale|rollout|cordon|uncordon|drain)([[:space:]]|$)|helm[[:space:]]+(install|upgrade|uninstall|delete|rollback)([[:space:]]|$)|terraform[[:space:]]+(apply|destroy)([[:space:]]|$)|docker[[:space:]]+(rm|rmi|run|container[[:space:]]+(rm|prune))([[:space:]]|$)|chmod([[:space:]]|$)|chown([[:space:]]|$))' \
+      || printf '%s\n' "$normalized" | grep -Eiq '(^|[[:space:];|&()])(tee|sed[[:space:]]+-i|perl[[:space:]]+-i)([[:space:]]|$)' \
+      || printf '%s\n' "$normalized" | grep -Eiq 'curl[[:space:]].*(--request|-X)[[:space:]]*(POST|PUT|PATCH|DELETE)'
     then
       deny "Read-mode Claude workers cannot run destructive or mutating Bash commands. Return read-only evidence instead."
     fi
+    ;;
+  *)
+    deny "Read-mode Claude workers allow only read-only built-in tools and Bash inspection commands. External or unknown tools require write mode."
     ;;
 esac
 

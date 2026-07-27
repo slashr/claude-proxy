@@ -13,6 +13,9 @@ const WIDGET_URI = `ui://claude-proxy/activity-${encodeURIComponent(SERVER_VERSI
 const WIDGET_MIME = "text/html;profile=mcp-app";
 const DATA_DIR = process.env.PLUGIN_DATA || path.join(os.homedir(), ".codex", "plugins", "data", "claude-proxy-personal");
 const JOB_DIR = path.join(DATA_DIR, "claude-jobs");
+const PROGRESS_RELAY_MIN_INTERVAL_MS = 3000;
+const WORKER_MAX_WAIT_MS = 600000;
+const lastProgressRelay = new Map();
 
 function plainObject(value) {
   return value && typeof value === "object" && !Array.isArray(value);
@@ -38,8 +41,9 @@ function safeText(value, limit = 80) {
 function redact(value) {
   return String(value || "")
     .replace(/-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+ PRIVATE KEY-----/g, "[redacted private key]")
-    .replace(/\b(?:Bearer\s+)?(?:ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|xox[a-zA-Z]-[A-Za-z0-9-]+)\b/g, "[redacted credential]")
-    .replace(/\b(ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|password|token)\s*[=:]\s*[^\s'\"]+/gi, "$1=[redacted]");
+    .replace(/\b(?:Bearer\s+)?(?:ghp_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]+|xox[a-zA-Z]-[A-Za-z0-9-]+|tskey-[A-Za-z0-9_-]+|(?:AKIA|ASIA)[A-Z0-9]{16})\b/g, "[redacted credential]")
+    .replace(/\b(https?:\/\/)[^\s\/@:]+:[^\s\/@]+@/gi, "$1[redacted credentials]@")
+    .replace(/\b(ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|password|token|access-token|client-certificate-data|client-key-data|certificate-authority-data)\s*[=:]\s*[^\s'\"]+/gi, "$1=[redacted]");
 }
 
 function preview(value, limit) {
@@ -59,6 +63,8 @@ function activityDetails(activityFile) {
   let retryError = null;
   let initialized = false;
   let hasResult = false;
+  let assistantUpdates = 0;
+  let latestAssistantMessage = null;
   const transcript = [];
   try {
     for (const line of fs.readFileSync(activityFile, "utf8").split("\n")) {
@@ -80,7 +86,11 @@ function activityDetails(activityFile) {
         }
         if (event.type === "assistant" && block?.type === "text") {
           const text = preview(block.text, 1600);
-          if (text) transcript.push({ kind: "assistant", text });
+          if (text) {
+            assistantUpdates += 1;
+            latestAssistantMessage = text;
+            transcript.push({ kind: "assistant", text });
+          }
         }
         if (event.type === "assistant" && block?.type === "tool_use" && typeof block.name === "string") {
           const name = safeText(block.name);
@@ -95,9 +105,11 @@ function activityDetails(activityFile) {
         if (event.type === "user" && block?.type === "tool_result" && typeof block.tool_use_id === "string") {
           const tracked = toolEvents.get(block.tool_use_id);
           if (tracked) {
-            tracked.item.status = block.is_error ? "failed" : "completed";
+            const output = preview(block.content, 1100);
+            const readOnlyGuard = block.is_error && /Read-mode Claude workers cannot/.test(output);
+            tracked.item.status = readOnlyGuard ? "guarded" : block.is_error ? "failed" : "completed";
             tracked.transcriptItem.status = tracked.item.status;
-            tracked.transcriptItem.output = preview(block.content, 1100);
+            tracked.transcriptItem.output = output;
           }
         }
       }
@@ -110,14 +122,17 @@ function activityDetails(activityFile) {
   const visibleTimeline = timeline.slice(-12).map(({ kind, label, status }) => ({ kind, label, status }));
   const currentTool = [...visibleTimeline].reverse().find(item => item.kind === "tool" && item.status === "running");
   const failedTool = [...visibleTimeline].reverse().find(item => item.kind === "tool" && item.status === "failed");
+  const guardedTool = [...visibleTimeline].reverse().find(item => item.kind === "tool" && item.status === "guarded");
   return {
     event_count: events,
+    assistant_update_count: assistantUpdates,
+    latest_assistant_message: latestAssistantMessage,
     retries,
     retry_error: retryError,
     tool_calls: [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, count]) => ({ name, count })),
     timeline: visibleTimeline,
     transcript: transcript.slice(-30),
-    phase: failedTool ? `${failedTool.label} needs attention` : currentTool ? `Running ${currentTool.label}` : hasResult ? "Preparing final answer" : initialized ? "Preparing work" : "Starting Claude worker",
+    phase: failedTool ? `${failedTool.label} needs attention` : currentTool ? `Running ${currentTool.label}` : guardedTool ? "Continuing in read-only mode" : hasResult ? "Preparing final answer" : initialized ? "Preparing work" : "Starting Claude worker",
   };
 }
 
@@ -137,6 +152,8 @@ function snapshot(jobId, rich = false) {
     updated_at: job.updated_at || job.started_at || null,
     elapsed_seconds: job.started_at ? Math.max(0, elapsedReference - job.started_at) : null,
     event_count: activity.event_count,
+    assistant_update_count: activity.assistant_update_count,
+    progress_message: activity.latest_assistant_message,
     retries: activity.retries,
     retry_error: activity.retry_error,
     tool_calls: activity.tool_calls,
@@ -207,6 +224,31 @@ function widgetHtml(resourceUri = WIDGET_URI) {
     line-height: 18px;
   }
   #claude-worker-card .content { padding: 0; }
+  #claude-worker-card .activity-summary {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    list-style: none;
+  }
+  #claude-worker-card .activity-summary::-webkit-details-marker { display: none; }
+  #claude-worker-card .activity-summary .brand { min-width: 0; }
+  #claude-worker-card .activity-phase {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: .65;
+    font-size: 12px;
+  }
+  #claude-worker-card .activity-summary::after {
+    content: "Show";
+    font-size: 11px;
+    opacity: .56;
+  }
+  #claude-worker-card details.activity[open] .activity-summary::after { content: "Hide"; }
+  #claude-worker-card .activity-body { padding-top: 10px; }
   #claude-worker-card .mark { width: 20px; height: 20px; border-radius: 6px; font-size: 12px; }
   #claude-worker-card .state { padding: 2px 8px; font-size: 11px; }
   #claude-worker-card .tool-summary { gap: 6px; margin-top: 6px; padding: 7px 9px; }
@@ -277,19 +319,22 @@ function widgetHtml(resourceUri = WIDGET_URI) {
   #claude-worker-card .notice { padding: 8px 0 0; font-size: 11px; background: transparent; }
 </style>
 <section id="claude-worker-card" aria-live="polite">
-  <div class="content">
-    <div class="head"><div class="brand"><span class="mark">✦</span><span>Claude worker</span></div><span id="state" class="state">Connecting</span></div>
-    <div id="phase" class="phase">Connecting to worker…</div>
-    <p id="detail" class="detail">Loading safe activity…</p>
-    <div id="stats" class="stats"></div>
-    <ol id="timeline" class="timeline"><li class="empty">Waiting for the first public activity update…</li></ol>
-    <ol id="transcript" class="transcript"></ol>
-  </div>
-  <div class="notice">Streaming Claude activity. Credentials are redacted before rendering.</div>
+  <details class="activity">
+    <summary class="activity-summary"><div class="brand"><span class="mark">✦</span><span>Claude worker</span></div><span id="activity-phase" class="activity-phase">Connecting to worker…</span><span id="state" class="state">Connecting</span></summary>
+    <div class="content activity-body">
+      <div id="phase" class="phase">Connecting to worker…</div>
+      <p id="detail" class="detail">Loading safe activity…</p>
+      <div id="stats" class="stats"></div>
+      <ol id="timeline" class="timeline"><li class="empty">Waiting for the first public activity update…</li></ol>
+      <ol id="transcript" class="transcript"></ol>
+    </div>
+    <div class="notice">Streaming Claude activity. Credentials are redacted before rendering.</div>
+  </details>
 </section>
 <script type="module">
 (() => {
   const state = document.getElementById("state");
+  const activityPhase = document.getElementById("activity-phase");
   const phase = document.getElementById("phase");
   const detail = document.getElementById("detail");
   const stats = document.getElementById("stats");
@@ -313,6 +358,7 @@ function widgetHtml(resourceUri = WIDGET_URI) {
     state.textContent = currentState;
     state.className = "state " + currentState;
     phase.textContent = data.phase || "Claude worker is running";
+    activityPhase.textContent = data.phase || "Claude worker is running";
     detail.textContent = data.detail || "Claude worker is running.";
     detail.className = "detail" + (data.retry_error ? " warn" : "");
     const bits = [];
@@ -417,10 +463,10 @@ function toolError(error) {
 function tools() {
   const schema = { type: "object", properties: { job_id: { type: "string", description: "Claude worker job ID supplied by the prompt hook." } }, required: ["job_id"], additionalProperties: false };
   return [
-    { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Call this immediately when the prompt hook supplies a job ID.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
+    { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Use only when the user explicitly asks to inspect activity.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "wait_for_claude_worker", title: "Waiting for Claude worker", description: "Wait until a Claude worker finishes, then return its worker result for Codex to verify and synthesize. The inline activity card remains the user-facing progress view.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Waiting for Claude worker", "openai/toolInvocation/invoked": "Claude worker finished" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Wait until a Claude worker finishes or emits a safe, rate-limited progress message. When state is running and progress_message is present, relay it to the user, then call this tool again. When it finishes, synthesize worker_result. Total wait time is capped at 10 minutes from worker start.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: 600, description: "Maximum time to wait; defaults to 600." } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -431,18 +477,32 @@ async function callTool(name, args) {
   if (name === "show_claude_worker") return toolResult(snapshot(jobId), true);
   if (name === "get_claude_worker_status") return toolResult(snapshot(jobId));
   if (name === "get_claude_worker_activity") return toolResult(snapshot(jobId, true));
-  if (name === "wait_for_claude_worker") {
-    const deadline = Date.now() + ((args.timeout_seconds || 600) * 1000);
+  if (name === "claude_is_working" || name === "wait_for_claude_worker") {
     let current = snapshot(jobId);
+    const requestedDeadline = Date.now() + ((args.timeout_seconds || 600) * 1000);
+    const workerDeadline = current.started_at ? (current.started_at * 1000) + WORKER_MAX_WAIT_MS : requestedDeadline;
+    const deadline = Math.min(requestedDeadline, workerDeadline);
+    const initialAssistantUpdates = current.assistant_update_count || 0;
     while (!["completed", "failed"].includes(current.state) && Date.now() < deadline) {
       await sleep(750);
       current = snapshot(jobId);
+      if (["completed", "failed"].includes(current.state)) break;
+      const previousRelay = lastProgressRelay.get(jobId);
+      const mayRelay = !previousRelay || (Date.now() - previousRelay.at) >= PROGRESS_RELAY_MIN_INTERVAL_MS;
+      if (mayRelay && current.assistant_update_count > initialAssistantUpdates && current.progress_message) {
+        lastProgressRelay.set(jobId, { at: Date.now(), assistantUpdates: current.assistant_update_count });
+        return toolResult({ ...current, worker_result: null, progress_update: true });
+      }
     }
     if (current.state === "completed") {
+      lastProgressRelay.delete(jobId);
       const job = readJson(jobPath(jobId));
       return toolResult({ ...current, worker_result: job.result, claude_session_id: job.claude_session_id });
     }
-    if (current.state === "failed") return toolResult({ ...current, worker_result: null });
+    if (current.state === "failed") {
+      lastProgressRelay.delete(jobId);
+      return toolResult({ ...current, worker_result: null });
+    }
     return toolResult({ ...current, timed_out: true, worker_result: null });
   }
   throw new Error(`unknown tool: ${name}`);
@@ -455,7 +515,7 @@ async function handle(message) {
   if (!plainObject(message)) return rpcError(null, -32600, "Invalid Request");
   if (typeof message.method !== "string") return rpcError(message.id ?? null, -32600, "Invalid method");
   if (message.method.startsWith("notifications/") || message.method === "$/cancelRequest") return null;
-  if (message.method === "initialize") return rpc(message.id, { protocolVersion: message.params?.protocolVersion || "2024-11-05", capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: SERVER_NAME, title: "Claude worker activity", version: SERVER_VERSION }, instructions: "Use show_claude_worker immediately after the Claude prompt hook provides a job ID, then wait_for_claude_worker before responding." });
+  if (message.method === "initialize") return rpc(message.id, { protocolVersion: message.params?.protocolVersion || "2024-11-05", capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: SERVER_NAME, title: "Claude worker activity", version: SERVER_VERSION }, instructions: "Use claude_is_working after the Claude prompt hook provides a job ID. Open show_claude_worker only when the user explicitly asks to inspect activity." });
   if (message.method === "ping") return rpc(message.id, {});
   if (message.method === "tools/list") return rpc(message.id, { tools: tools() });
   if (message.method === "tools/call") {
