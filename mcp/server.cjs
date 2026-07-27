@@ -224,24 +224,50 @@ function widgetHtml(resourceUri = WIDGET_URI) {
     border-radius: 0;
     padding: 5px 0;
   }
+  /* Tool activity is supporting detail: keep it on a compact, shared baseline. */
+  #claude-worker-card .transcript > details.entry.tool {
+    min-height: 0;
+    padding: 0;
+  }
+  #claude-worker-card .transcript > details.entry.tool .tool-summary {
+    min-height: 24px;
+    box-sizing: border-box;
+    padding: 3px 0;
+    line-height: 16px;
+  }
   #claude-worker-card .tool-summary {
     grid-template-columns: auto minmax(0, 1fr) auto auto;
     align-items: center;
     gap: 0 8px;
   }
-  #claude-worker-card .tool-summary > .tool-title { grid-column: 1; grid-row: 1; }
+  #claude-worker-card .tool-summary > .tool-title {
+    grid-column: 1;
+    grid-row: 1;
+    font-size: 12px;
+    line-height: 16px;
+    white-space: nowrap;
+  }
   #claude-worker-card .tool-summary > .tool-preview {
     grid-column: 2;
     grid-row: 1;
     min-width: 0;
+    font-size: 10px;
+    line-height: 14px;
   }
-  #claude-worker-card .tool-summary > .outcome { grid-column: 3; grid-row: 1; }
+  #claude-worker-card .tool-summary > .outcome {
+    grid-column: 3;
+    grid-row: 1;
+    padding: 1px 6px;
+    font-size: 10px;
+    line-height: 14px;
+  }
   #claude-worker-card .tool-summary > .tool-hint { display: none; }
   #claude-worker-card .tool-summary::after {
     grid-column: 4;
     grid-row: 1;
     content: "Show";
     font-size: 11px;
+    line-height: 14px;
     opacity: .56;
   }
   #claude-worker-card details.entry.tool[open] .tool-summary::after { content: "Hide"; }
