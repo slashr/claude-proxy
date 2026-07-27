@@ -13,7 +13,9 @@ plugin_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 job_id=$(jq -er '.job_id' "$job_file")
 codex_session_id=$(jq -er '.codex_session_id' "$job_file")
 prompt=$(jq -er '.prompt' "$job_file")
+working_dir=$(jq -r '.working_dir // "/"' "$job_file")
 worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
+worker_strategy=$(jq -r '.worker_strategy // "default"' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
 session_file="$session_dir/$codex_session_id"
 session_lock="$session_dir/$codex_session_id.lock"
@@ -26,6 +28,13 @@ cleanup_lock() {
   fi
 }
 trap cleanup_lock EXIT
+
+# launchctl workers otherwise start in `/`, which prevents Claude Code from
+# resolving the task's project memory and instruction files.
+if [[ ! -d "$working_dir" ]]; then
+  working_dir="/"
+fi
+cd "$working_dir"
 
 case "$worker_mode" in
   read) permission_mode="bypassPermissions" ;;
@@ -47,7 +56,9 @@ write_job() {
     --arg job_id "$job_id" \
     --arg codex_session_id "$codex_session_id" \
     --arg activity_file "$activity_file" \
+    --arg working_dir "$working_dir" \
     --arg worker_mode "$worker_mode" \
+    --arg worker_strategy "$worker_strategy" \
     --arg state "$state" \
     --arg detail "$detail" \
     --arg result "$result" \
@@ -55,7 +66,7 @@ write_job() {
     --arg tool_summary "$summary" \
     --argjson started_at "$(jq -r '.started_at' "$job_file")" \
     --argjson updated_at "$(date +%s)" \
-    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,worker_mode:$worker_mode,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at}' >"$temporary"
+    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,working_dir:$working_dir,worker_mode:$worker_mode,worker_strategy:$worker_strategy,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at}' >"$temporary"
   mv "$temporary" "$job_file"
 }
 
@@ -100,9 +111,14 @@ if [[ -s "$session_file" ]]; then
   claude_args+=(--resume "$(<"$session_file")")
 fi
 
+worker_guidance="Act as the primary worker for this task. Work in the supplied current directory. The worker mode is $worker_mode: in read mode, use only authorized read-only tools; in write mode, make only file changes that are clearly within the user's request and do not make external-state changes unless explicitly requested. Return concise evidence plus blockers. Codex will verify and present the result. Do not disclose private reasoning; tool calls and concise progress are enough."
+if [[ "$worker_strategy" == "operational" ]]; then
+  worker_guidance+=" This is a live operational status or incident query: start with relevant project memory and current runtime evidence. Prefer a small set of batched direct read-only checks. Do not enumerate repositories or delegate an Explore agent merely to discover context; do that only when live evidence is insufficient."
+fi
+
 set +e
 CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${claude_args[@]}" \
-  --append-system-prompt "Act as the primary worker for this task. Work in the supplied current directory. The worker mode is $worker_mode: in read mode, use only authorized read-only tools; in write mode, make only file changes that are clearly within the user's request and do not make external-state changes unless explicitly requested. Return concise evidence plus blockers. Codex will verify and present the result. Do not disclose private reasoning; tool calls and concise progress are enough." \
+  --append-system-prompt "$worker_guidance" \
   "$prompt" 2>&1 | tee "$activity_file" >/dev/null
 claude_status=${PIPESTATUS[0]}
 set -e
