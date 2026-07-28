@@ -44,16 +44,17 @@ small task where delegating to Claude is unnecessary.
 
 ## Voice task exclusion
 
-GPT-Live does not expose a voice-specific field to Codex hooks, so the plugin
-cannot automatically identify a voice task. To keep a whole voice chat in
-Codex, say this exact sentence as its own turn:
+GPT-Live wraps delegated work with the Voice transcript and rotates the Codex
+task session for each delegation. To keep a whole voice chat in Codex, say this
+exact sentence as its own turn:
 
 ```text
 Use Codex only for this chat
 ```
 
-The plugin keeps that task in Codex-only mode until you say one of these exact
-commands as its own turn:
+The plugin reads the most recent routing command in the GPT-Live transcript for
+each delegated task, so later Voice work remains Codex-only until you say one
+of these exact commands as its own turn:
 
 ```text
 Resume Claude Proxy
@@ -63,8 +64,8 @@ Resume Claude Proxy
 Use Claude again
 ```
 
-Typed tasks can use `/codex thread` for the same persistent Codex-only mode.
-The ordinary `/codex` marker remains a one-prompt bypass.
+Typed tasks can use `/codex thread` for a session-scoped Codex-only mode. The
+ordinary `/codex` marker remains a one-prompt bypass.
 
 ## Worker permissions
 

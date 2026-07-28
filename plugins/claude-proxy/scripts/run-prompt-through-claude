@@ -32,9 +32,34 @@ mkdir -p "$session_dir"
 mkdir -p "$activity_dir"
 mkdir -p "$job_dir"
 
-# Voice conversations do not identify their source in the hook payload. An
-# explicit, exact spoken command is therefore the safe way to opt a voice task
-# into Codex-only handling for its full session.
+# GPT-Live sends work as a realtime-delegation wrapper. It keeps the voice
+# conversation in transcript_delta but assigns a new Codex session ID to each
+# delegated task, so session-file state cannot carry the user's routing choice.
+# Inspect the transcript instead and let the latest spoken control command win.
+voice_routing=""
+if [[ "$prompt" == *"<realtime_delegation>"* && "$prompt" == *"<transcript_delta>"* && "$prompt" == *"</transcript_delta>"* ]]; then
+  voice_transcript=${prompt#*<transcript_delta>}
+  voice_transcript=${voice_transcript%%</transcript_delta>*}
+  while IFS= read -r voice_line; do
+    if [[ "$voice_line" =~ ^[[:space:]]*[Uu]ser:[[:space:]]*(.*)$ ]]; then
+      voice_user_text=$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')
+      if [[ "$voice_user_text" == *"use codex only for this chat"* || "$voice_user_text" == *"use codex only for this task"* || "$voice_user_text" == *"use codex only for this thread"* ]]; then
+        voice_routing="codex"
+      elif [[ "$voice_user_text" == *"resume claude proxy"* || "$voice_user_text" == *"use claude proxy"* || "$voice_user_text" == *"use claude again"* ]]; then
+        voice_routing="claude"
+      fi
+    fi
+  done <<<"$voice_transcript"
+fi
+
+if [[ "$voice_routing" == "codex" ]]; then
+  : >"$session_file.bypass"
+  jq -n '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:"Claude Proxy is bypassed because the latest GPT-Live routing command is Codex-only. Say `resume Claude proxy` in Voice to re-enable Claude for later delegated tasks."}}'
+  exit 0
+fi
+
+# Typed tasks use the current Codex session ID, so they can keep a conventional
+# session-scoped Codex-only marker.
 prompt_for_routing=$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//; s/[.!?]+$//')
 case "$prompt_for_routing" in
   "resume claude proxy"|"use claude proxy"|"use claude again")
