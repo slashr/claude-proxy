@@ -502,19 +502,19 @@ async function callTool(name, args) {
       const mayRelay = !previousRelay || (Date.now() - previousRelay.at) >= PROGRESS_RELAY_MIN_INTERVAL_MS;
       if (mayRelay && current.assistant_update_count > initialAssistantUpdates && current.progress_message) {
         lastProgressRelay.set(jobId, { at: Date.now(), assistantUpdates: current.assistant_update_count });
-        return toolResult({ ...current, worker_result: null, progress_update: true }, true);
+        return toolResult({ ...current, worker_result: null, progress_update: true });
       }
     }
     if (current.state === "completed") {
       lastProgressRelay.delete(jobId);
       const job = readJson(jobPath(jobId));
-      return toolResult({ ...current, worker_result: job.result, claude_session_id: job.claude_session_id }, true);
+      return toolResult({ ...current, worker_result: job.result, claude_session_id: job.claude_session_id });
     }
     if (current.state === "failed") {
       lastProgressRelay.delete(jobId);
-      return toolResult({ ...current, worker_result: null }, true);
+      return toolResult({ ...current, worker_result: null });
     }
-    return toolResult({ ...current, timed_out: true, worker_result: null }, true);
+    return toolResult({ ...current, timed_out: true, worker_result: null });
   }
   throw new Error(`unknown tool: ${name}`);
 }
