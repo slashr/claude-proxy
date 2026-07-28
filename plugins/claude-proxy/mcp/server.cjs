@@ -470,10 +470,10 @@ function toolError(error) {
 function tools() {
   const schema = { type: "object", properties: { job_id: { type: "string", description: "Claude worker job ID supplied by the prompt hook." } }, required: ["job_id"], additionalProperties: false };
   return [
-    { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the live inline activity card for an already-started Claude worker. Use only when the user explicitly asks to inspect activity.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
+    { name: "show_claude_worker", title: "Show Claude worker activity", description: "Render one durable inline activity card for a completed or failed Claude worker. Call it exactly once after claude_is_working reports a terminal state; do not call it while the worker is running.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it finishes, synthesize worker_result. Total worker time is capped at 10 minutes from worker start.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, call show_claude_worker exactly once with the same job ID, then synthesize worker_result. Total worker time is capped at 10 minutes from worker start.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -481,7 +481,7 @@ function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
 async function callTool(name, args) {
   const jobId = args?.job_id;
-  if (name === "show_claude_worker") return toolResult(snapshot(jobId), true);
+  if (name === "show_claude_worker") return toolResult(snapshot(jobId, true), true);
   if (name === "get_claude_worker_status") return toolResult(snapshot(jobId));
   if (name === "get_claude_worker_activity") return toolResult(snapshot(jobId, true));
   if (name === "claude_is_working" || name === "wait_for_claude_worker") {
