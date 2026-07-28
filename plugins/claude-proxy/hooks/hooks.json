@@ -25,6 +25,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/bin/sh -c 'root=${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}; root=${root#file://}; export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin; exec /bin/bash \"$root/scripts/cancel-claude-worker\"'",
+            "timeout": 10,
+            "statusMessage": "Stopping Claude worker"
+          }
+        ]
+      }
     ]
   }
 }

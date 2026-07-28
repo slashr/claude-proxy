@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+hook_input=$(cat)
+session_id=$(printf '%s' "$hook_input" | jq -r '.session_id // empty')
+plugin_data_dir=${PLUGIN_DATA:-${CLAUDE_PLUGIN_DATA:-}}
+
+if [[ -z "$plugin_data_dir" || ! "$session_id" =~ ^[A-Za-z0-9-]+$ ]]; then
+  jq -n '{continue:true}'
+  exit 0
+fi
+
+session_dir="$plugin_data_dir/claude-sessions"
+job_dir="$plugin_data_dir/claude-jobs"
+session_lock="$session_dir/$session_id.lock"
+job_id=$(cat "$session_lock/job_id" 2>/dev/null || true)
+
+if [[ ! "$job_id" =~ ^[A-Za-z0-9-]+$ ]]; then
+  jq -n '{continue:true}'
+  exit 0
+fi
+
+job_file="$job_dir/$job_id.json"
+state=$(jq -r '.state // empty' "$job_file" 2>/dev/null || true)
+if [[ "$state" != "queued" && "$state" != "running" ]]; then
+  jq -n '{continue:true}'
+  exit 0
+fi
+
+launch_label=$(jq -r '.launch_label // empty' "$job_file" 2>/dev/null || true)
+if [[ ! "$launch_label" =~ ^[A-Za-z0-9.-]+$ ]]; then launch_label=""; fi
+
+: >"$job_file.cancelled"
+now=$(date +%s)
+temporary="$job_file.cancelled.tmp"
+jq --arg detail 'Cancelled from ChatGPT.' --argjson now "$now" \
+  '.state="cancelled" | .detail=$detail | .result="" | .updated_at=$now | .finished_at=$now | .exit_code=143' \
+  "$job_file" >"$temporary"
+mv "$temporary" "$job_file"
+
+if [[ -n "$launch_label" ]]; then
+  user_id=$(id -u)
+  /bin/launchctl bootout "gui/$user_id/$launch_label" >/dev/null 2>&1 \
+    || /bin/launchctl bootout "user/$user_id/$launch_label" >/dev/null 2>&1 \
+    || true
+fi
+
+jq -n '{continue:true}'
