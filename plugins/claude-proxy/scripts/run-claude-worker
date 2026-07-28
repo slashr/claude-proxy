@@ -18,9 +18,14 @@ prompt=$(jq -er '.prompt' "$job_file")
 working_dir=$(jq -r '.working_dir // empty' "$job_file")
 worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
+cancel_file="$job_file.cancelled"
 session_file="$session_dir/$codex_session_id"
 session_lock="$session_dir/$codex_session_id.lock"
 job_terminal=0
+claude_pid=""
+tee_pid=""
+stream_dir=""
+stream_fifo=""
 
 cleanup_lock() {
   if [[ $(cat "$session_lock/job_id" 2>/dev/null || true) == "$job_id" ]]; then
@@ -46,7 +51,7 @@ write_job() {
   local exit_code=${6:-null}
   local finished_at=null
   local temporary="$job_file.tmp"
-  if [[ "$state" == "completed" || "$state" == "failed" ]]; then
+  if [[ "$state" == "completed" || "$state" == "failed" || "$state" == "cancelled" ]]; then
     finished_at=$(date +%s)
     job_terminal=1
   fi
@@ -69,16 +74,42 @@ write_job() {
   mv "$temporary" "$job_file"
 }
 
+cleanup_stream() {
+  if [[ -n "$stream_fifo" ]]; then rm -f "$stream_fifo"; fi
+  if [[ -n "$stream_dir" ]]; then rmdir "$stream_dir" 2>/dev/null || true; fi
+  stream_fifo=""
+  stream_dir=""
+  claude_pid=""
+  tee_pid=""
+}
+
+cancel_worker() {
+  trap - TERM INT
+  if [[ -n "$claude_pid" ]]; then kill -TERM "$claude_pid" 2>/dev/null || true; fi
+  if [[ -n "$claude_pid" ]]; then wait "$claude_pid" 2>/dev/null || true; fi
+  if [[ -n "$tee_pid" ]]; then wait "$tee_pid" 2>/dev/null || true; fi
+  cleanup_stream
+  write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143 || true
+  cleanup_lock
+  trap - EXIT
+  exit 143
+}
+
 finalize_unexpected_exit() {
   local status=$?
   if [[ $job_terminal -eq 0 ]]; then
-    write_job "failed" "Claude worker exited unexpectedly (status $status)." "" "" "No Claude tool calls reported." "$status" || true
+    if [[ -f "$cancel_file" ]]; then
+      write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143 || true
+    else
+      write_job "failed" "Claude worker exited unexpectedly (status $status)." "" "" "No Claude tool calls reported." "$status" || true
+    fi
   fi
   cleanup_lock
   trap - EXIT
   exit "$status"
 }
 trap finalize_unexpected_exit EXIT
+trap cancel_worker TERM INT
 
 # launchctl workers otherwise start in `/`, which prevents Claude Code from
 # resolving the task's project memory and instruction files. Do not silently
@@ -106,6 +137,10 @@ safe_summary() {
 
 : >"$activity_file"
 write_job "running" "Claude worker is starting in $worker_mode mode."
+if [[ -f "$cancel_file" ]]; then
+  write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143
+  exit 143
+fi
 
 claude_bin=$(command -v claude || true)
 if [[ -z "$claude_bin" && -x "${HOME:-}/.local/bin/claude" ]]; then
@@ -121,11 +156,21 @@ base_claude_args=(-p --verbose --output-format stream-json --permission-mode "$p
 run_claude() {
   local -a args=("$@")
   : >"$activity_file"
+  stream_dir=$(mktemp -d "$activity_dir/${job_id}.stream.XXXXXX")
+  stream_fifo="$stream_dir/output"
+  mkfifo "$stream_fifo"
+  tee "$activity_file" <"$stream_fifo" >/dev/null &
+  tee_pid=$!
   set +e
-  CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${args[@]}" \
-    "$prompt" 2>&1 | tee "$activity_file" >/dev/null
-  claude_status=${PIPESTATUS[0]}
+  CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${args[@]}" "$prompt" >"$stream_fifo" 2>&1 &
+  claude_pid=$!
+  wait "$claude_pid"
+  claude_status=$?
+  claude_pid=""
+  wait "$tee_pid"
+  tee_pid=""
   set -e
+  cleanup_stream
 }
 
 claude_args=("${base_claude_args[@]}")
@@ -139,6 +184,11 @@ if [[ -s "$session_file" ]]; then
   fi
 else
   run_claude "${claude_args[@]}"
+fi
+
+if [[ -f "$cancel_file" ]]; then
+  write_job "cancelled" "Cancelled from ChatGPT." "" "" "$(safe_summary)" 143
+  exit 143
 fi
 
 summary=$(safe_summary)

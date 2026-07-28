@@ -148,13 +148,13 @@ function snapshot(jobId, rich = false) {
   if (!job) throw new Error(`worker job was not found: ${resolvedJobPath}`);
   const activity = activityDetails(job.activity_file || path.join(DATA_DIR, "claude-activity", `${jobId}.jsonl`));
   const state = job.state || "queued";
-  const terminal = ["completed", "failed"].includes(state);
+  const terminal = ["completed", "failed", "cancelled"].includes(state);
   const elapsedReference = terminal ? (job.updated_at || job.started_at) : Math.floor(Date.now() / 1000);
   const snapshot = {
     job_id: job.job_id,
     state,
     detail: job.detail || "Claude worker is queued.",
-    phase: state === "completed" ? "Work completed" : state === "failed" ? "Worker needs attention" : activity.phase,
+    phase: state === "completed" ? "Work completed" : state === "failed" ? "Worker needs attention" : state === "cancelled" ? "Work cancelled" : activity.phase,
     started_at: job.started_at || null,
     updated_at: job.updated_at || job.started_at || null,
     elapsed_seconds: job.started_at ? Math.max(0, elapsedReference - job.started_at) : null,
@@ -187,6 +187,7 @@ function widgetHtml(resourceUri = WIDGET_URI) {
   .state { border-radius:999px; padding:4px 10px; font-size:12px; font-weight:650; text-transform:capitalize; background:color-mix(in srgb, #7c3aed 18%, transparent); }
   .state.completed { background:color-mix(in srgb, #16a34a 20%, transparent); color:color-mix(in srgb, #16a34a 80%, currentColor); }
   .state.failed { background:color-mix(in srgb, #dc2626 18%, transparent); color:color-mix(in srgb, #dc2626 82%, currentColor); }
+  .state.cancelled { background:color-mix(in srgb, #d97706 20%, transparent); color:color-mix(in srgb, #d97706 82%, currentColor); }
   .phase { margin:14px 0 3px; font-size:15px; font-weight:620; }
   .detail { margin:0; opacity:.7; font-size:13px; }
   .stats { display:flex; gap:8px; flex-wrap:wrap; margin-top:13px; }
@@ -409,7 +410,7 @@ function widgetHtml(resourceUri = WIDGET_URI) {
       if (entry.text) { const body = document.createElement("div"); body.textContent = entry.text; item.append(body); }
       return item;
     }));
-    if (["completed", "failed"].includes(data.state) && timer) { clearInterval(timer); timer = null; }
+    if (["completed", "failed", "cancelled"].includes(data.state) && timer) { clearInterval(timer); timer = null; }
   }
   async function refresh() {
     if (!jobId) { detail.textContent = "Worker ID was unavailable; reopen this activity card."; return; }
@@ -470,10 +471,10 @@ function toolError(error) {
 function tools() {
   const schema = { type: "object", properties: { job_id: { type: "string", description: "Claude worker job ID supplied by the prompt hook." } }, required: ["job_id"], additionalProperties: false };
   return [
-    { name: "show_claude_worker", title: "Show Claude worker activity", description: "Render one durable inline activity card for a completed or failed Claude worker. Call it exactly once after claude_is_working reports a terminal state; do not call it while the worker is running.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
+    { name: "show_claude_worker", title: "Show Claude worker activity", description: "Render one durable inline activity card for a completed, failed, or cancelled Claude worker. Call it exactly once after claude_is_working reports a terminal state; do not call it while the worker is running.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, call show_claude_worker exactly once with the same job ID, then synthesize worker_result. Total worker time is capped at 10 minutes from worker start.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed, failed, or cancelled, call show_claude_worker exactly once with the same job ID, then synthesize worker_result or acknowledge cancellation. Total worker time is capped at 10 minutes from worker start.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -494,10 +495,10 @@ async function callTool(name, args) {
     const workerDeadline = current.started_at ? (current.started_at * 1000) + WORKER_MAX_WAIT_MS : requestedDeadline;
     const deadline = Math.min(requestedDeadline, workerDeadline);
     const initialAssistantUpdates = current.assistant_update_count || 0;
-    while (!["completed", "failed"].includes(current.state) && Date.now() < deadline) {
+    while (!["completed", "failed", "cancelled"].includes(current.state) && Date.now() < deadline) {
       await sleep(750);
       current = snapshot(jobId);
-      if (["completed", "failed"].includes(current.state)) break;
+      if (["completed", "failed", "cancelled"].includes(current.state)) break;
       const previousRelay = lastProgressRelay.get(jobId);
       const mayRelay = !previousRelay || (Date.now() - previousRelay.at) >= PROGRESS_RELAY_MIN_INTERVAL_MS;
       if (mayRelay && current.assistant_update_count > initialAssistantUpdates && current.progress_message) {
@@ -513,6 +514,10 @@ async function callTool(name, args) {
     if (current.state === "failed") {
       lastProgressRelay.delete(jobId);
       return toolResult({ ...current, worker_result: null });
+    }
+    if (current.state === "cancelled") {
+      lastProgressRelay.delete(jobId);
+      return toolResult({ ...current, worker_result: null, cancelled: true });
     }
     return toolResult({ ...current, timed_out: true, worker_result: null });
   }

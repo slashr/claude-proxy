@@ -25,7 +25,7 @@ only one copy installs hooks:
 codex plugin remove claude-proxy@personal
 ```
 
-Quit and reopen ChatGPT. Open `/hooks` once and trust the two plugin hooks.
+Quit and reopen ChatGPT. Open `/hooks` once and trust the plugin hooks.
 Every ordinary substantive prompt then starts a Claude worker. The account must
 also have Claude Code installed and logged in to the Claude subscription it
 should use.
@@ -51,6 +51,14 @@ are allowed; the worker no longer enables `bypassPermissions` or
 host timeout, stale Claude session IDs are retried from a fresh session, and
 unexpected worker exits finalize as failed jobs instead of remaining
 permanently running.
+
+## Stopping work
+
+Use the ChatGPT desktop Stop button while a Claude-backed task is running to
+cancel its active worker. The activity state becomes `cancelled`, polling ends,
+and the worker's launchd service is unloaded so it does not restart. A Stop
+hook is part of this behavior, so trust the updated hook definition after an
+upgrade.
 
 ## Updating
 
