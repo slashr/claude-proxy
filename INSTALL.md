@@ -42,6 +42,30 @@ The marker is intentionally per-prompt. The next normal prompt returns to
 Claude Proxy routing automatically. Use it for Codex-only UI/connectors or a
 small task where delegating to Claude is unnecessary.
 
+## Voice task exclusion
+
+GPT-Live does not expose a voice-specific field to Codex hooks, so the plugin
+cannot automatically identify a voice task. To keep a whole voice chat in
+Codex, say this exact sentence as its own turn:
+
+```text
+Use Codex only for this chat
+```
+
+The plugin keeps that task in Codex-only mode until you say one of these exact
+commands as its own turn:
+
+```text
+Resume Claude Proxy
+```
+
+```text
+Use Claude again
+```
+
+Typed tasks can use `/codex thread` for the same persistent Codex-only mode.
+The ordinary `/codex` marker remains a one-prompt bypass.
+
 ## Worker permissions
 
 Claude workers run headlessly with Claude Auto Mode in both read and write
