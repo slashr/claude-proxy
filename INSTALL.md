@@ -52,6 +52,10 @@ host timeout, stale Claude session IDs are retried from a fresh session, and
 unexpected worker exits finalize as failed jobs instead of remaining
 permanently running.
 
+While a worker runs, its job record is refreshed every five seconds. A worker
+that exceeds the 10-minute limit is terminated, unloaded from launchd, and
+recorded as failed rather than being left detached from its task.
+
 ## Stopping work
 
 Use the ChatGPT desktop Stop button while a Claude-backed task is running to
