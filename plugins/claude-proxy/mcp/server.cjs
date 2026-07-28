@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const readline = require("node:readline");
+const { spawnSync } = require("node:child_process");
 
 const PLUGIN_ROOT = path.resolve(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"), "utf8"));
@@ -38,6 +39,38 @@ function readJson(file) {
 function jobPath(jobId) {
   if (typeof jobId !== "string" || !/^[A-Za-z0-9-]+$/.test(jobId)) throw new Error("invalid worker job id");
   return path.join(JOB_DIR, `${jobId}.json`);
+}
+
+function writeJsonAtomic(file, value) {
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(value));
+  fs.renameSync(temporary, file);
+}
+
+function finalizeTimedOutWorker(jobId) {
+  const file = jobPath(jobId);
+  const job = readJson(file);
+  if (!job || !["queued", "running"].includes(job.state)) return job;
+  const now = Math.floor(Date.now() / 1000);
+  fs.writeFileSync(`${file}.timed_out`, "");
+  const timedOut = {
+    ...job,
+    state: "failed",
+    detail: "Claude worker exceeded the 10-minute limit.",
+    result: "",
+    updated_at: now,
+    finished_at: now,
+    exit_code: 124,
+  };
+  writeJsonAtomic(file, timedOut);
+  if (typeof job.launch_label === "string" && /^[A-Za-z0-9.-]+$/.test(job.launch_label)) {
+    const userId = String(process.getuid?.() ?? "");
+    for (const target of [`gui/${userId}/${job.launch_label}`, `user/${userId}/${job.launch_label}`]) {
+      const result = spawnSync("/bin/launchctl", ["bootout", target], { stdio: "ignore" });
+      if (result.status === 0) break;
+    }
+  }
+  return timedOut;
 }
 
 function safeText(value, limit = 80) {
@@ -505,6 +538,10 @@ async function callTool(name, args) {
         lastProgressRelay.set(jobId, { at: Date.now(), assistantUpdates: current.assistant_update_count });
         return toolResult({ ...current, worker_result: null, progress_update: true });
       }
+    }
+    if (!["completed", "failed", "cancelled"].includes(current.state) && current.started_at && Date.now() >= workerDeadline) {
+      finalizeTimedOutWorker(jobId);
+      current = snapshot(jobId);
     }
     if (current.state === "completed") {
       lastProgressRelay.delete(jobId);

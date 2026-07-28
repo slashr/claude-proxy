@@ -19,13 +19,18 @@ working_dir=$(jq -r '.working_dir // empty' "$job_file")
 worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
 cancel_file="$job_file.cancelled"
+timeout_file="$job_file.timed_out"
 session_file="$session_dir/$codex_session_id"
 session_lock="$session_dir/$codex_session_id.lock"
+launch_label=$(jq -r '.launch_label // empty' "$job_file")
 job_terminal=0
 claude_pid=""
 tee_pid=""
+heartbeat_pid=""
+timeout_pid=""
 stream_dir=""
 stream_fifo=""
+worker_timeout_seconds=${CLAUDE_WORKER_MAX_SECONDS:-600}
 
 cleanup_lock() {
   if [[ $(cat "$session_lock/job_id" 2>/dev/null || true) == "$job_id" ]]; then
@@ -50,7 +55,8 @@ write_job() {
   local summary=${5:-}
   local exit_code=${6:-null}
   local finished_at=null
-  local temporary="$job_file.tmp"
+  local temporary
+  temporary=$(mktemp "$job_file.tmp.XXXXXX")
   if [[ "$state" == "completed" || "$state" == "failed" || "$state" == "cancelled" ]]; then
     finished_at=$(date +%s)
     job_terminal=1
@@ -61,6 +67,7 @@ write_job() {
     --arg activity_file "$activity_file" \
     --arg working_dir "$working_dir" \
     --arg worker_mode "$worker_mode" \
+    --arg launch_label "$launch_label" \
     --arg state "$state" \
     --arg detail "$detail" \
     --arg result "$result" \
@@ -70,8 +77,36 @@ write_job() {
     --argjson updated_at "$(date +%s)" \
     --argjson finished_at "$finished_at" \
     --argjson exit_code "$exit_code" \
-    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,working_dir:$working_dir,worker_mode:$worker_mode,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at,finished_at:$finished_at,exit_code:$exit_code}' >"$temporary"
+    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,working_dir:$working_dir,worker_mode:$worker_mode,launch_label:$launch_label,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at,finished_at:$finished_at,exit_code:$exit_code}' >"$temporary"
   mv "$temporary" "$job_file"
+}
+
+stop_background_workers() {
+  if [[ -n "$heartbeat_pid" ]]; then kill -TERM "$heartbeat_pid" 2>/dev/null || true; wait "$heartbeat_pid" 2>/dev/null || true; fi
+  if [[ -n "$timeout_pid" ]]; then kill -TERM "$timeout_pid" 2>/dev/null || true; wait "$timeout_pid" 2>/dev/null || true; fi
+  heartbeat_pid=""
+  timeout_pid=""
+}
+
+start_background_workers() {
+  (
+    trap - TERM INT EXIT
+    while kill -0 "$claude_pid" 2>/dev/null; do
+      sleep 5
+      [[ -f "$cancel_file" || -f "$timeout_file" ]] && exit 0
+      kill -0 "$claude_pid" 2>/dev/null || exit 0
+      write_job "running" "Claude worker is working." "" "" "$(safe_summary)" || true
+    done
+  ) &
+  heartbeat_pid=$!
+  (
+    trap - TERM INT EXIT
+    sleep "$worker_timeout_seconds"
+    [[ -f "$cancel_file" || -f "$timeout_file" ]] && exit 0
+    : >"$timeout_file"
+    kill -TERM "$$" 2>/dev/null || true
+  ) &
+  timeout_pid=$!
 }
 
 cleanup_stream() {
@@ -85,11 +120,19 @@ cleanup_stream() {
 
 cancel_worker() {
   trap - TERM INT
+  stop_background_workers
   if [[ -n "$claude_pid" ]]; then kill -TERM "$claude_pid" 2>/dev/null || true; fi
   if [[ -n "$claude_pid" ]]; then wait "$claude_pid" 2>/dev/null || true; fi
   if [[ -n "$tee_pid" ]]; then wait "$tee_pid" 2>/dev/null || true; fi
   cleanup_stream
-  write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143 || true
+  if [[ -f "$timeout_file" ]]; then
+    write_job "failed" "Claude worker exceeded the 10-minute limit." "" "" "No Claude tool calls reported." 124 || true
+    cleanup_lock
+    trap - EXIT
+    exit 124
+  else
+    write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143 || true
+  fi
   cleanup_lock
   trap - EXIT
   exit 143
@@ -97,8 +140,11 @@ cancel_worker() {
 
 finalize_unexpected_exit() {
   local status=$?
+  stop_background_workers
   if [[ $job_terminal -eq 0 ]]; then
-    if [[ -f "$cancel_file" ]]; then
+    if [[ -f "$timeout_file" ]]; then
+      write_job "failed" "Claude worker exceeded the 10-minute limit." "" "" "No Claude tool calls reported." 124 || true
+    elif [[ -f "$cancel_file" ]]; then
       write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143 || true
     else
       write_job "failed" "Claude worker exited unexpectedly (status $status)." "" "" "No Claude tool calls reported." "$status" || true
@@ -164,9 +210,11 @@ run_claude() {
   set +e
   CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${args[@]}" "$prompt" >"$stream_fifo" 2>&1 &
   claude_pid=$!
+  start_background_workers
   wait "$claude_pid"
   claude_status=$?
   claude_pid=""
+  stop_background_workers
   wait "$tee_pid"
   tee_pid=""
   set -e
@@ -189,6 +237,11 @@ fi
 if [[ -f "$cancel_file" ]]; then
   write_job "cancelled" "Cancelled from ChatGPT." "" "" "$(safe_summary)" 143
   exit 143
+fi
+
+if [[ -f "$timeout_file" ]]; then
+  write_job "failed" "Claude worker exceeded the 10-minute limit." "" "" "$(safe_summary)" 124
+  exit 124
 fi
 
 summary=$(safe_summary)
