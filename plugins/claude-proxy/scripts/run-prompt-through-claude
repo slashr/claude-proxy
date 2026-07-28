@@ -53,9 +53,18 @@ if [[ "$prompt" == *"<realtime_delegation>"* && "$prompt" == *"<transcript_delta
 fi
 
 if [[ "$voice_routing" == "codex" ]]; then
+  # The same Voice chat keeps its Codex task session even when later
+  # transcript_delta payloads omit the original command.
+  : >"$session_codex_only_file"
   : >"$session_file.bypass"
-  jq -n '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:"Claude Proxy is bypassed because the latest GPT-Live routing command is Codex-only. Say `resume Claude proxy` in Voice to re-enable Claude for later delegated tasks."}}'
+  jq -n '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:"Claude Proxy is bypassed because the latest GPT-Live routing command is Codex-only. This Voice task stays in Codex-only mode until the user says `resume Claude proxy`."}}'
   exit 0
+fi
+
+if [[ "$voice_routing" == "claude" ]]; then
+  # A Voice resume command must clear the session marker before the standard
+  # routing path below checks it.
+  rm -f "$session_codex_only_file"
 fi
 
 # Typed tasks use the current Codex session ID, so they can keep a conventional

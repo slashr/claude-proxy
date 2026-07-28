@@ -52,9 +52,10 @@ exact sentence as its own turn:
 Use Codex only for this chat
 ```
 
-The plugin reads the most recent routing command in the GPT-Live transcript for
-each delegated task, so later Voice work remains Codex-only until you say one
-of these exact commands as its own turn:
+The plugin records that choice in the Voice task session. This keeps later
+Voice work Codex-only even after GPT-Live no longer includes the opening command
+in its transcript. Say one of these exact commands as its own turn to resume
+Claude routing:
 
 ```text
 Resume Claude Proxy
