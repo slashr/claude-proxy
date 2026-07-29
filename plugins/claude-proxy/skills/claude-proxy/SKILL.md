@@ -9,7 +9,7 @@ Codex owns the conversation, authorization, and validation. The installed `UserP
 
 ## Workflow
 
-1. The prompt hook provides a Claude worker job ID. Call `claude_is_working` for that job ID. Each poll returns within four minutes so the host request cannot expire; if it returns `timed_out: true`, call it again. Related prompts resume the same Claude session when it is still available; stale sessions are retried from a fresh Claude session automatically.
+1. The prompt hook provides a Claude worker job ID. Call `claude_is_working` for that job ID. Each poll returns within four minutes so the host request cannot expire; if it returns `timed_out: true`, call it again. New requests start a fresh Claude conversation, even within the same Codex task. Resume a prior Claude conversation only when the user explicitly says `continue`, `resume`, `pick up`, or `carry on`; stale session IDs are retried from a fresh session automatically. Read jobs have a 10-minute budget and write jobs have a 30-minute budget.
 2. Do not call a Codex shell tool before explaining or synthesizing the worker result. The direct-shell guard denies the call.
 3. The inline card shows a redacted live transcript: Claude-visible text, thinking summaries, tool names, and bounded tool inputs/results. It must redact credentials and private keys before rendering.
 4. The worker uses Claude's `auto` permission mode in both read and write modes. Claude Auto Mode's classifier decides which actions are allowed; the worker does not pass `bypassPermissions` or `--dangerously-skip-permissions`. The separate direct-Codex shell guard remains active so Codex does not silently substitute itself for Claude.
