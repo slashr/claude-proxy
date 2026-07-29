@@ -76,14 +76,22 @@ are allowed; the worker no longer enables `bypassPermissions` or
 `--dangerously-skip-permissions`. Worker polling is bounded below the desktop
 host timeout, stale Claude session IDs are retried from a fresh session, and
 unexpected worker exits finalize as failed jobs instead of remaining
-permanently running. New requests begin in a fresh Claude conversation, even
-inside the same Codex task; say `continue`, `resume`, `pick up`, or `carry on`
-when an earlier Claude conversation is intentionally relevant.
+permanently running. Follow-ups in the same Codex task and workspace resume
+their Claude conversation, so short replies such as `pr?` keep their task
+context. Separate Codex tasks are isolated. Say `fresh Claude` or `new Claude
+task` to intentionally start a clean Claude conversation.
 
-While a worker runs, its job record is refreshed every five seconds. A worker
-that exceeds its job budget is terminated, unloaded from launchd, and recorded
-as failed rather than being left detached from its task. Read jobs have a
-10-minute budget; implementation and PR workflows have a 30-minute budget.
+When a fresh conversation is necessary, the plugin supplies a bounded handoff
+packet with the prior user request, prior worker result, workspace, and Git
+branch/HEAD. It does not forward private Codex reasoning or raw tool
+transcripts.
+
+While a worker runs, its job record is refreshed every five seconds. Workers
+have no runtime budget and are never terminated for taking a long time; polling
+continues for as long as the work does. That five-second heartbeat is instead
+used for liveness: a worker whose heartbeat has been silent for five minutes and
+whose process is gone is unloaded from launchd and recorded as failed, so a job
+killed outright cannot be polled forever.
 
 ## Stopping work
 

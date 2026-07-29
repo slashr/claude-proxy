@@ -19,10 +19,12 @@ const DATA_DIR = process.env.PLUGIN_DATA
   || path.join(os.homedir(), ".codex", "plugins", "data", `${PLUGIN_NAME}-${MARKETPLACE}`);
 const JOB_DIR = path.join(DATA_DIR, "claude-jobs");
 const PROGRESS_RELAY_MIN_INTERVAL_MS = 3000;
-const DEFAULT_READ_WORKER_MAX_WAIT_MS = 600000;
-const DEFAULT_WRITE_WORKER_MAX_WAIT_MS = 1800000;
-const MIN_WORKER_RUNTIME_SECONDS = 60;
-const MAX_WORKER_RUNTIME_SECONDS = 3600;
+// Workers have no runtime budget: polling continues for as long as the work
+// takes. The only backstop is liveness, so a worker that was killed outright
+// cannot be polled forever. The worker heartbeats every five seconds, so a
+// silence this long means it is gone, and the PID check keeps a machine that
+// slept mid-job from being mistaken for a dead one.
+const WORKER_HEARTBEAT_TIMEOUT_SECONDS = 300;
 const TOOL_POLL_DEFAULT_WAIT_SECONDS = 120;
 const TOOL_POLL_MAX_WAIT_SECONDS = 240;
 const lastProgressRelay = new Map();
@@ -44,40 +46,51 @@ function jobPath(jobId) {
   return path.join(JOB_DIR, `${jobId}.json`);
 }
 
-function workerRuntimeSeconds(job) {
-  const fallback = job?.worker_mode === "write" ? DEFAULT_WRITE_WORKER_MAX_WAIT_MS / 1000 : DEFAULT_READ_WORKER_MAX_WAIT_MS / 1000;
-  const configured = Number(job?.max_runtime_seconds);
-  return Number.isInteger(configured) && configured >= MIN_WORKER_RUNTIME_SECONDS && configured <= MAX_WORKER_RUNTIME_SECONDS
-    ? configured
-    : fallback;
-}
-
-function workerTimeoutDetail(job) {
-  return `Claude worker exceeded the ${Math.round(workerRuntimeSeconds(job) / 60)}-minute limit.`;
-}
-
 function writeJsonAtomic(file, value) {
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(temporary, JSON.stringify(value));
   fs.renameSync(temporary, file);
 }
 
-function finalizeTimedOutWorker(jobId) {
+function workerProcessAlive(job) {
+  const pid = Number(job?.worker_pid);
+  if (!Number.isInteger(pid) || pid <= 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the PID exists but belongs to another user, which is still
+    // proof of life; only ESRCH says nothing is there.
+    return error.code === "EPERM";
+  }
+}
+
+// A worker is only declared dead when its heartbeat has gone quiet *and* its
+// process is gone. A queued job that never launched has no PID, so it fails
+// once the same silence elapses.
+function workerIsDead(job) {
+  if (!job || !["queued", "running"].includes(job.state)) return false;
+  const lastSign = Number(job.updated_at || job.started_at);
+  if (!Number.isInteger(lastSign)) return false;
+  const silentFor = Math.floor(Date.now() / 1000) - lastSign;
+  return silentFor >= WORKER_HEARTBEAT_TIMEOUT_SECONDS && !workerProcessAlive(job);
+}
+
+function finalizeDeadWorker(jobId) {
   const file = jobPath(jobId);
   const job = readJson(file);
-  if (!job || !["queued", "running"].includes(job.state)) return job;
+  if (!workerIsDead(job)) return job;
   const now = Math.floor(Date.now() / 1000);
-  fs.writeFileSync(`${file}.timed_out`, "");
-  const timedOut = {
+  const dead = {
     ...job,
     state: "failed",
-    detail: workerTimeoutDetail(job),
+    detail: "Claude worker stopped responding and is no longer running.",
     result: "",
     updated_at: now,
     finished_at: now,
     exit_code: 124,
   };
-  writeJsonAtomic(file, timedOut);
+  writeJsonAtomic(file, dead);
   if (typeof job.launch_label === "string" && /^[A-Za-z0-9.-]+$/.test(job.launch_label)) {
     const userId = String(process.getuid?.() ?? "");
     for (const target of [`gui/${userId}/${job.launch_label}`, `user/${userId}/${job.launch_label}`]) {
@@ -85,7 +98,7 @@ function finalizeTimedOutWorker(jobId) {
       if (result.status === 0) break;
     }
   }
-  return timedOut;
+  return dead;
 }
 
 function safeText(value, limit = 80) {
@@ -522,7 +535,7 @@ function tools() {
     { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the inline activity card for an already-started Claude worker. Use only when the user explicitly asks to inspect activity.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, synthesize worker_result. When state is cancelled, stop polling and acknowledge the cancellation. Read jobs have a 10-minute budget; write jobs have a 30-minute budget.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, synthesize worker_result. When state is cancelled, stop polling and acknowledge the cancellation. Workers have no time limit, so keep polling for as long as the job stays running, however many polls that takes.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -539,9 +552,7 @@ async function callTool(name, args) {
       TOOL_POLL_MAX_WAIT_SECONDS,
       Math.max(1, Number(args.timeout_seconds || TOOL_POLL_DEFAULT_WAIT_SECONDS)),
     );
-    const requestedDeadline = Date.now() + (requestedTimeoutSeconds * 1000);
-    const workerDeadline = current.started_at ? (current.started_at * 1000) + (workerRuntimeSeconds(readJson(jobPath(jobId)) || current) * 1000) : requestedDeadline;
-    const deadline = Math.min(requestedDeadline, workerDeadline);
+    const deadline = Date.now() + (requestedTimeoutSeconds * 1000);
     const initialAssistantUpdates = current.assistant_update_count || 0;
     while (!["completed", "failed", "cancelled"].includes(current.state) && Date.now() < deadline) {
       await sleep(750);
@@ -554,8 +565,8 @@ async function callTool(name, args) {
         return toolResult({ ...current, worker_result: null, progress_update: true });
       }
     }
-    if (!["completed", "failed", "cancelled"].includes(current.state) && current.started_at && Date.now() >= workerDeadline) {
-      finalizeTimedOutWorker(jobId);
+    if (!["completed", "failed", "cancelled"].includes(current.state) && workerIsDead(readJson(jobPath(jobId)))) {
+      finalizeDeadWorker(jobId);
       current = snapshot(jobId);
     }
     if (current.state === "completed") {

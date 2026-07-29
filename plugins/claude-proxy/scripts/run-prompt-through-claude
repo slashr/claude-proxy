@@ -10,6 +10,7 @@ working_dir=$(printf '%s' "$hook_input" | jq -r '.cwd // .working_directory // .
 if [[ -z "$working_dir" || ! -d "$working_dir" ]]; then
   working_dir=$(pwd -P)
 fi
+working_dir=$(cd "$working_dir" && pwd -P)
 plugin_data_dir=${PLUGIN_DATA:-${CLAUDE_PLUGIN_DATA:-}}
 if [[ -z "$plugin_data_dir" ]]; then
   printf '%s\n' 'Claude proxy requires PLUGIN_DATA or CLAUDE_PLUGIN_DATA.' >&2
@@ -23,6 +24,7 @@ fi
 plugin_root=${plugin_root#file://}
 session_dir="$plugin_data_dir/claude-sessions"
 session_file="$session_dir/$codex_session_id"
+session_context_file="$session_dir/$codex_session_id.context.json"
 session_lock="$session_dir/$codex_session_id.lock"
 session_codex_only_file="$session_dir/$codex_session_id.codex-only"
 activity_dir="$plugin_data_dir/claude-activity"
@@ -112,37 +114,36 @@ launch_label="com.claude-proxy.worker.${job_id}.${RANDOM}"
 # Claude's classifier remains responsible for deciding which actions are allowed.
 worker_mode="read"
 prompt_for_mode=$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')
-if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe|commit|push|publish|execute|perform)([^[:alpha:]]|$) \
+if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe|commit|push|publish|remove|delete|squash|merge|pr|execute|perform)([^[:alpha:]]|$) \
   || "$prompt_for_mode" =~ (carry[[:space:]]+out|proceed[[:space:]]+with)[[:space:]] \
   || "$prompt_for_mode" =~ (open|submit)[[:space:]]+(a[[:space:]]+)?(pull[[:space:]]+request|pr) ]]; then
   worker_mode="write"
 fi
 
-# A Codex task may contain unrelated follow-up requests. Start a fresh Claude
-# conversation by default so an older investigation cannot steer a new task.
-# Keep continuation available, but require the user to say so explicitly.
+# Codex gives each task a stable session ID. Keep its Claude conversation for
+# follow-ups in the same workspace, which makes short replies such as "pr?"
+# useful. A different Codex task has a different session ID and cannot resume
+# this one. Explicit fresh-task wording, or a workspace mismatch, starts over.
 resume_session=false
-if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(continue|resume)([^[:alpha:]]|$) \
-  || "$prompt_for_mode" =~ (pick[[:space:]]+up|carry[[:space:]]+on)[[:space:]] ]]; then
+context_workspace=$(jq -r '.working_dir // empty' "$session_context_file" 2>/dev/null || true)
+if [[ -s "$session_file" && "$context_workspace" == "$working_dir" \
+  && ! "$prompt_for_mode" =~ (fresh[[:space:]]+claude|new[[:space:]]+claude[[:space:]]+(task|session)) ]]; then
   resume_session=true
 fi
 
-worker_max_runtime_seconds=600
-if [[ "$worker_mode" == "write" ]]; then
-  worker_max_runtime_seconds=1800
-fi
-
+# Workers run to completion. There is no wall-clock budget: a long task is a
+# long task, not a failure. Liveness is tracked through the worker heartbeat.
 jq -n \
   --arg job_id "$job_id" \
   --arg codex_session_id "$codex_session_id" \
   --arg prompt "$prompt" \
   --arg working_dir "$working_dir" \
+  --arg context_file "$session_context_file" \
   --arg worker_mode "$worker_mode" \
   --argjson resume_session "$resume_session" \
-  --argjson max_runtime_seconds "$worker_max_runtime_seconds" \
   --arg launch_label "$launch_label" \
   --argjson started_at "$(date +%s)" \
-  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,working_dir:$working_dir,worker_mode:$worker_mode,resume_session:$resume_session,max_runtime_seconds:$max_runtime_seconds,launch_label:$launch_label,state:"queued",started_at:$started_at}' >"$job_file"
+  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,working_dir:$working_dir,context_file:$context_file,worker_mode:$worker_mode,resume_session:$resume_session,launch_label:$launch_label,state:"queued",started_at:$started_at}' >"$job_file"
 
 # One Claude session must have one active worker. Concurrent --resume calls
 # race the session transcript and can leave the activity card permanently stale.
