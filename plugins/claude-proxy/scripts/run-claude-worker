@@ -17,6 +17,8 @@ codex_session_id=$(jq -er '.codex_session_id' "$job_file")
 prompt=$(jq -er '.prompt' "$job_file")
 working_dir=$(jq -r '.working_dir // empty' "$job_file")
 worker_mode=$(jq -r '.worker_mode // "read"' "$job_file")
+resume_session=$(jq -r '.resume_session // false' "$job_file")
+worker_timeout_seconds=$(jq -r '.max_runtime_seconds // empty' "$job_file")
 activity_file="$activity_dir/$job_id.jsonl"
 cancel_file="$job_file.cancelled"
 timeout_file="$job_file.timed_out"
@@ -30,7 +32,6 @@ heartbeat_pid=""
 timeout_pid=""
 stream_dir=""
 stream_fifo=""
-worker_timeout_seconds=${CLAUDE_WORKER_MAX_SECONDS:-600}
 
 cleanup_lock() {
   if [[ $(cat "$session_lock/job_id" 2>/dev/null || true) == "$job_id" ]]; then
@@ -40,12 +41,18 @@ cleanup_lock() {
 }
 
 case "$worker_mode" in
-  read|write) permission_mode="auto" ;;
+  read) permission_mode="auto"; default_timeout_seconds=600 ;;
+  write) permission_mode="auto"; default_timeout_seconds=1800 ;;
   *)
     printf '%s\n' "Unsupported Claude worker mode: $worker_mode" >&2
     exit 2
     ;;
 esac
+
+if ! [[ "$worker_timeout_seconds" =~ ^[0-9]+$ ]] || (( worker_timeout_seconds < 60 || worker_timeout_seconds > 3600 )); then
+  worker_timeout_seconds=$default_timeout_seconds
+fi
+worker_timeout_label="$((worker_timeout_seconds / 60))-minute"
 
 write_job() {
   local state=$1
@@ -67,6 +74,8 @@ write_job() {
     --arg activity_file "$activity_file" \
     --arg working_dir "$working_dir" \
     --arg worker_mode "$worker_mode" \
+    --argjson resume_session "$resume_session" \
+    --argjson max_runtime_seconds "$worker_timeout_seconds" \
     --arg launch_label "$launch_label" \
     --arg state "$state" \
     --arg detail "$detail" \
@@ -77,7 +86,7 @@ write_job() {
     --argjson updated_at "$(date +%s)" \
     --argjson finished_at "$finished_at" \
     --argjson exit_code "$exit_code" \
-    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,working_dir:$working_dir,worker_mode:$worker_mode,launch_label:$launch_label,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at,finished_at:$finished_at,exit_code:$exit_code}' >"$temporary"
+    '{job_id:$job_id,codex_session_id:$codex_session_id,activity_file:$activity_file,working_dir:$working_dir,worker_mode:$worker_mode,resume_session:$resume_session,max_runtime_seconds:$max_runtime_seconds,launch_label:$launch_label,state:$state,detail:$detail,result:$result,claude_session_id:$claude_session_id,tool_summary:$tool_summary,started_at:$started_at,updated_at:$updated_at,finished_at:$finished_at,exit_code:$exit_code}' >"$temporary"
   mv "$temporary" "$job_file"
 }
 
@@ -126,7 +135,7 @@ cancel_worker() {
   if [[ -n "$tee_pid" ]]; then wait "$tee_pid" 2>/dev/null || true; fi
   cleanup_stream
   if [[ -f "$timeout_file" ]]; then
-    write_job "failed" "Claude worker exceeded the 10-minute limit." "" "" "No Claude tool calls reported." 124 || true
+    write_job "failed" "Claude worker exceeded the ${worker_timeout_label} limit." "" "" "No Claude tool calls reported." 124 || true
     cleanup_lock
     trap - EXIT
     exit 124
@@ -143,7 +152,7 @@ finalize_unexpected_exit() {
   stop_background_workers
   if [[ $job_terminal -eq 0 ]]; then
     if [[ -f "$timeout_file" ]]; then
-      write_job "failed" "Claude worker exceeded the 10-minute limit." "" "" "No Claude tool calls reported." 124 || true
+      write_job "failed" "Claude worker exceeded the ${worker_timeout_label} limit." "" "" "No Claude tool calls reported." 124 || true
     elif [[ -f "$cancel_file" ]]; then
       write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143 || true
     else
@@ -222,7 +231,7 @@ run_claude() {
 }
 
 claude_args=("${base_claude_args[@]}")
-if [[ -s "$session_file" ]]; then
+if [[ "$resume_session" == "true" && -s "$session_file" ]]; then
   claude_args+=(--resume "$(<"$session_file")")
   run_claude "${claude_args[@]}"
   if [[ $claude_status -ne 0 ]] && grep -Eiq 'No conversation found with session ID|session[^[:alnum:]]+(not found|does not exist)' "$activity_file"; then
@@ -240,7 +249,7 @@ if [[ -f "$cancel_file" ]]; then
 fi
 
 if [[ -f "$timeout_file" ]]; then
-  write_job "failed" "Claude worker exceeded the 10-minute limit." "" "" "$(safe_summary)" 124
+  write_job "failed" "Claude worker exceeded the ${worker_timeout_label} limit." "" "" "$(safe_summary)" 124
   exit 124
 fi
 

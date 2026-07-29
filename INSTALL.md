@@ -76,11 +76,14 @@ are allowed; the worker no longer enables `bypassPermissions` or
 `--dangerously-skip-permissions`. Worker polling is bounded below the desktop
 host timeout, stale Claude session IDs are retried from a fresh session, and
 unexpected worker exits finalize as failed jobs instead of remaining
-permanently running.
+permanently running. New requests begin in a fresh Claude conversation, even
+inside the same Codex task; say `continue`, `resume`, `pick up`, or `carry on`
+when an earlier Claude conversation is intentionally relevant.
 
 While a worker runs, its job record is refreshed every five seconds. A worker
-that exceeds the 10-minute limit is terminated, unloaded from launchd, and
-recorded as failed rather than being left detached from its task.
+that exceeds its job budget is terminated, unloaded from launchd, and recorded
+as failed rather than being left detached from its task. Read jobs have a
+10-minute budget; implementation and PR workflows have a 30-minute budget.
 
 ## Stopping work
 

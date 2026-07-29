@@ -112,9 +112,24 @@ launch_label="com.claude-proxy.worker.${job_id}.${RANDOM}"
 # Claude's classifier remains responsible for deciding which actions are allowed.
 worker_mode="read"
 prompt_for_mode=$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')
-if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe|commit|push|publish)([^[:alpha:]]|$) \
+if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|modify|edit|fix|refactor|write|change|install|enable|disable|configure|generate|test|probe|commit|push|publish|execute|perform)([^[:alpha:]]|$) \
+  || "$prompt_for_mode" =~ (carry[[:space:]]+out|proceed[[:space:]]+with)[[:space:]] \
   || "$prompt_for_mode" =~ (open|submit)[[:space:]]+(a[[:space:]]+)?(pull[[:space:]]+request|pr) ]]; then
   worker_mode="write"
+fi
+
+# A Codex task may contain unrelated follow-up requests. Start a fresh Claude
+# conversation by default so an older investigation cannot steer a new task.
+# Keep continuation available, but require the user to say so explicitly.
+resume_session=false
+if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(continue|resume)([^[:alpha:]]|$) \
+  || "$prompt_for_mode" =~ (pick[[:space:]]+up|carry[[:space:]]+on)[[:space:]] ]]; then
+  resume_session=true
+fi
+
+worker_max_runtime_seconds=600
+if [[ "$worker_mode" == "write" ]]; then
+  worker_max_runtime_seconds=1800
 fi
 
 jq -n \
@@ -123,9 +138,11 @@ jq -n \
   --arg prompt "$prompt" \
   --arg working_dir "$working_dir" \
   --arg worker_mode "$worker_mode" \
+  --argjson resume_session "$resume_session" \
+  --argjson max_runtime_seconds "$worker_max_runtime_seconds" \
   --arg launch_label "$launch_label" \
   --argjson started_at "$(date +%s)" \
-  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,working_dir:$working_dir,worker_mode:$worker_mode,launch_label:$launch_label,state:"queued",started_at:$started_at}' >"$job_file"
+  '{job_id:$job_id,codex_session_id:$codex_session_id,prompt:$prompt,working_dir:$working_dir,worker_mode:$worker_mode,resume_session:$resume_session,max_runtime_seconds:$max_runtime_seconds,launch_label:$launch_label,state:"queued",started_at:$started_at}' >"$job_file"
 
 # One Claude session must have one active worker. Concurrent --resume calls
 # race the session transcript and can leave the activity card permanently stale.

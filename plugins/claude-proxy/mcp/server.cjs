@@ -19,7 +19,10 @@ const DATA_DIR = process.env.PLUGIN_DATA
   || path.join(os.homedir(), ".codex", "plugins", "data", `${PLUGIN_NAME}-${MARKETPLACE}`);
 const JOB_DIR = path.join(DATA_DIR, "claude-jobs");
 const PROGRESS_RELAY_MIN_INTERVAL_MS = 3000;
-const WORKER_MAX_WAIT_MS = 600000;
+const DEFAULT_READ_WORKER_MAX_WAIT_MS = 600000;
+const DEFAULT_WRITE_WORKER_MAX_WAIT_MS = 1800000;
+const MIN_WORKER_RUNTIME_SECONDS = 60;
+const MAX_WORKER_RUNTIME_SECONDS = 3600;
 const TOOL_POLL_DEFAULT_WAIT_SECONDS = 120;
 const TOOL_POLL_MAX_WAIT_SECONDS = 240;
 const lastProgressRelay = new Map();
@@ -41,6 +44,18 @@ function jobPath(jobId) {
   return path.join(JOB_DIR, `${jobId}.json`);
 }
 
+function workerRuntimeSeconds(job) {
+  const fallback = job?.worker_mode === "write" ? DEFAULT_WRITE_WORKER_MAX_WAIT_MS / 1000 : DEFAULT_READ_WORKER_MAX_WAIT_MS / 1000;
+  const configured = Number(job?.max_runtime_seconds);
+  return Number.isInteger(configured) && configured >= MIN_WORKER_RUNTIME_SECONDS && configured <= MAX_WORKER_RUNTIME_SECONDS
+    ? configured
+    : fallback;
+}
+
+function workerTimeoutDetail(job) {
+  return `Claude worker exceeded the ${Math.round(workerRuntimeSeconds(job) / 60)}-minute limit.`;
+}
+
 function writeJsonAtomic(file, value) {
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(temporary, JSON.stringify(value));
@@ -56,7 +71,7 @@ function finalizeTimedOutWorker(jobId) {
   const timedOut = {
     ...job,
     state: "failed",
-    detail: "Claude worker exceeded the 10-minute limit.",
+    detail: workerTimeoutDetail(job),
     result: "",
     updated_at: now,
     finished_at: now,
@@ -507,7 +522,7 @@ function tools() {
     { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the inline activity card for an already-started Claude worker. Use only when the user explicitly asks to inspect activity.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, synthesize worker_result. When state is cancelled, stop polling and acknowledge the cancellation. Total worker time is capped at 10 minutes from worker start.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, synthesize worker_result. When state is cancelled, stop polling and acknowledge the cancellation. Read jobs have a 10-minute budget; write jobs have a 30-minute budget.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -525,7 +540,7 @@ async function callTool(name, args) {
       Math.max(1, Number(args.timeout_seconds || TOOL_POLL_DEFAULT_WAIT_SECONDS)),
     );
     const requestedDeadline = Date.now() + (requestedTimeoutSeconds * 1000);
-    const workerDeadline = current.started_at ? (current.started_at * 1000) + WORKER_MAX_WAIT_MS : requestedDeadline;
+    const workerDeadline = current.started_at ? (current.started_at * 1000) + (workerRuntimeSeconds(readJson(jobPath(jobId)) || current) * 1000) : requestedDeadline;
     const deadline = Math.min(requestedDeadline, workerDeadline);
     const initialAssistantUpdates = current.assistant_update_count || 0;
     while (!["completed", "failed", "cancelled"].includes(current.state) && Date.now() < deadline) {
