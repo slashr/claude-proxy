@@ -34,8 +34,13 @@ claude_pid=""
 tee_pid=""
 heartbeat_pid=""
 caffeinate_pid=""
+startup_watchdog_pid=""
 stream_dir=""
 stream_fifo=""
+last_attempt_startup_stalled=false
+last_attempt_retryable_failure=false
+startup_stall_attempts=0
+startup_stall_timeout_seconds=180
 
 cleanup_lock() {
   if [[ $(cat "$session_lock/job_id" 2>/dev/null || true) == "$job_id" ]]; then
@@ -95,6 +100,35 @@ stop_heartbeat() {
   heartbeat_pid=""
 }
 
+stop_startup_watchdog() {
+  if [[ -n "$startup_watchdog_pid" ]]; then
+    kill -TERM "$startup_watchdog_pid" 2>/dev/null || true
+    wait "$startup_watchdog_pid" 2>/dev/null || true
+  fi
+  startup_watchdog_pid=""
+}
+
+start_startup_watchdog() {
+  local attempt_file=$1
+  local stalled_file=$2
+  local observed_claude_pid=$claude_pid
+
+  # Claude Code should write its first stream event almost immediately. A
+  # running CLI that emits nothing is a startup hang, not long-running work.
+  # This guard deliberately stops watching after the first byte: real tasks
+  # remain unlimited regardless of how long they take after startup.
+  (
+    trap 'exit 0' TERM INT
+    sleep "$startup_stall_timeout_seconds"
+    [[ -f "$cancel_file" || -s "$attempt_file" ]] && exit 0
+    if kill -0 "$observed_claude_pid" 2>/dev/null; then
+      : >"$stalled_file"
+      kill -TERM "$observed_claude_pid" 2>/dev/null || true
+    fi
+  ) &
+  startup_watchdog_pid=$!
+}
+
 start_caffeinate() {
   # launchctl workers do not inherit an interactive power assertion. Prevent
   # idle sleep only while this job is active; caffeinate exits with this script
@@ -137,6 +171,7 @@ cleanup_stream() {
 
 cancel_worker() {
   trap - TERM INT
+  stop_startup_watchdog
   stop_heartbeat
   stop_caffeinate
   if [[ -n "$claude_pid" ]]; then kill -TERM "$claude_pid" 2>/dev/null || true; fi
@@ -151,6 +186,7 @@ cancel_worker() {
 
 finalize_unexpected_exit() {
   local status=$?
+  stop_startup_watchdog
   stop_heartbeat
   stop_caffeinate
   if [[ $job_terminal -eq 0 ]]; then
@@ -251,8 +287,9 @@ worker_prompt=$(build_worker_prompt)
 
 run_claude() {
   local -a args=("$@")
-  local attempt_file attempt_has_result attempt_is_error
+  local attempt_file stalled_file attempt_has_result attempt_is_error
   attempt_file=$(mktemp "$activity_dir/${job_id}.attempt.XXXXXX")
+  stalled_file="$attempt_file.startup-stalled"
   stream_dir=$(mktemp -d "$activity_dir/${job_id}.stream.XXXXXX")
   stream_fifo="$stream_dir/output"
   mkfifo "$stream_fifo"
@@ -261,31 +298,37 @@ run_claude() {
   set +e
   CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${args[@]}" "$worker_prompt" >"$stream_fifo" 2>&1 &
   claude_pid=$!
+  start_startup_watchdog "$attempt_file" "$stalled_file"
   start_heartbeat
   wait "$claude_pid"
   claude_status=$?
   claude_pid=""
+  stop_startup_watchdog
   stop_heartbeat
   wait "$tee_pid"
   tee_pid=""
   cat "$attempt_file" >>"$activity_file"
   attempt_has_result=$(jq -se 'any(.[]; .type == "result")' "$attempt_file" 2>/dev/null || printf false)
   attempt_is_error=$(jq -r 'select(.type == "result") | .is_error // false' "$attempt_file" 2>/dev/null | tail -1)
-  if [[ $claude_status -ne 0 || "$attempt_has_result" != "true" || "$attempt_is_error" == "true" ]]; then
-    if grep -Eiq 'overloaded|connection closed mid-response|connection (reset|timed out)|ECONNRESET|temporarily unavailable' "$attempt_file"; then
-      last_attempt_provider_failure=true
-    else
-      last_attempt_provider_failure=false
-    fi
+  if [[ -f "$stalled_file" ]]; then
+    last_attempt_startup_stalled=true
+    last_attempt_retryable_failure=true
+    startup_stall_attempts=$((startup_stall_attempts + 1))
   else
-    last_attempt_provider_failure=false
+    last_attempt_startup_stalled=false
+    last_attempt_retryable_failure=false
   fi
-  rm -f "$attempt_file"
+  if [[ "$last_attempt_startup_stalled" != true && ( $claude_status -ne 0 || "$attempt_has_result" != "true" || "$attempt_is_error" == "true" ) ]]; then
+    if grep -Eiq 'overloaded|connection closed mid-response|connection (reset|timed out)|ECONNRESET|temporarily unavailable' "$attempt_file"; then
+      last_attempt_retryable_failure=true
+    fi
+  fi
+  rm -f "$attempt_file" "$stalled_file"
   set -e
   cleanup_stream
 }
 
-run_claude_with_provider_retries() {
+run_claude_with_retries() {
   local -a args=("$@")
   local retry_attempt=0
   local delay_seconds
@@ -294,12 +337,16 @@ run_claude_with_provider_retries() {
   while true; do
     run_claude "${args[@]}"
     [[ -f "$cancel_file" ]] && return
-    if [[ "$last_attempt_provider_failure" != true || $retry_attempt -ge $max_retries ]]; then
+    if [[ "$last_attempt_retryable_failure" != true || $retry_attempt -ge $max_retries ]]; then
       return
     fi
     retry_attempt=$((retry_attempt + 1))
     delay_seconds=$((20 * (2 ** (retry_attempt - 1))))
-    write_job "running" "Claude provider is overloaded; retrying in ${delay_seconds}s (attempt ${retry_attempt}/${max_retries})." "" "" "$(safe_summary)" || true
+    if [[ "$last_attempt_startup_stalled" == true ]]; then
+      write_job "running" "Claude worker emitted no startup activity; retrying in ${delay_seconds}s (attempt ${retry_attempt}/${max_retries})." "" "" "$(safe_summary)" || true
+    else
+      write_job "running" "Claude provider is overloaded; retrying in ${delay_seconds}s (attempt ${retry_attempt}/${max_retries})." "" "" "$(safe_summary)" || true
+    fi
     sleep "$delay_seconds"
   done
 }
@@ -307,14 +354,14 @@ run_claude_with_provider_retries() {
 claude_args=("${base_claude_args[@]}")
 if [[ "$resume_session" == "true" && -s "$session_file" ]]; then
   claude_args+=(--resume "$(<"$session_file")")
-  run_claude_with_provider_retries "${claude_args[@]}"
+  run_claude_with_retries "${claude_args[@]}"
   if [[ $claude_status -ne 0 ]] && grep -Eiq 'No conversation found with session ID|session[^[:alnum:]]+(not found|does not exist)' "$activity_file"; then
     rm -f "$session_file"
     claude_args=("${base_claude_args[@]}")
-    run_claude_with_provider_retries "${claude_args[@]}"
+    run_claude_with_retries "${claude_args[@]}"
   fi
 else
-  run_claude_with_provider_retries "${claude_args[@]}"
+  run_claude_with_retries "${claude_args[@]}"
 fi
 
 if [[ -f "$cancel_file" ]]; then
@@ -328,7 +375,9 @@ if [[ $claude_status -ne 0 || -z "$result_event" || "$result_event" == "null" ]]
   failure_status=$claude_status
   if [[ $failure_status -eq 0 ]]; then failure_status=1; fi
   retry_error=$(jq -r 'select(.type == "system" and .subtype == "api_retry") | .error' "$activity_file" 2>/dev/null | tail -1)
-  if [[ -n "$retry_error" ]]; then
+  if [[ $startup_stall_attempts -gt 0 ]]; then
+    write_job "failed" "Claude worker did not emit startup activity after automatic retries." "" "" "$summary" "$failure_status"
+  elif [[ -n "$retry_error" ]]; then
     write_job "failed" "Claude worker failed after provider retries: $retry_error." "" "" "$summary" "$failure_status"
   else
     write_job "failed" "Claude worker exited before returning a result." "" "" "$summary" "$failure_status"

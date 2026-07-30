@@ -96,7 +96,9 @@ been silent for five minutes and whose process is gone is unloaded from launchd
 and recorded as failed, so a job killed outright cannot be polled forever. A
 stale per-task lock is recovered by the same rule. Transient provider overloads
 or dropped mid-response connections are retried up to three times with 20, 40,
-and 80 second backoff.
+and 80 second backoff. A separate startup watchdog retries a Claude CLI that
+emits no first stream event within three minutes; it stops watching as soon as
+any activity arrives, so it never limits legitimate long-running work.
 
 ## Stopping work
 
