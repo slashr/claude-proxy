@@ -86,12 +86,17 @@ packet with the prior user request, prior worker result, workspace, and Git
 branch/HEAD. It does not forward private Codex reasoning or raw tool
 transcripts.
 
-While a worker runs, its job record is refreshed every five seconds. Workers
-have no runtime budget and are never terminated for taking a long time; polling
-continues for as long as the work does. That five-second heartbeat is instead
-used for liveness: a worker whose heartbeat has been silent for five minutes and
-whose process is gone is unloaded from launchd and recorded as failed, so a job
-killed outright cannot be polled forever.
+While a worker runs, its job record is refreshed every five seconds and macOS
+idle sleep is prevented with `caffeinate`; closing the laptop lid or forcing
+sleep can still suspend it. Workers have no runtime budget and are never
+terminated for taking a long time. Polls wait two minutes by default, with a
+one-minute minimum, so long work does not generate high-frequency status churn.
+The five-second heartbeat is used for liveness: a worker whose heartbeat has
+been silent for five minutes and whose process is gone is unloaded from launchd
+and recorded as failed, so a job killed outright cannot be polled forever. A
+stale per-task lock is recovered by the same rule. Transient provider overloads
+or dropped mid-response connections are retried up to three times with 20, 40,
+and 80 second backoff.
 
 ## Stopping work
 
