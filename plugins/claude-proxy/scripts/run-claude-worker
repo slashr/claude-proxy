@@ -303,7 +303,11 @@ run_claude() {
   stream_dir=$(mktemp -d "$activity_dir/${job_id}.stream.XXXXXX")
   stream_fifo="$stream_dir/output"
   mkfifo "$stream_fifo"
-  tee "$attempt_file" <"$stream_fifo" >/dev/null &
+  # Keep the complete per-attempt record for retries while appending every
+  # streamed event to the activity log immediately. The MCP status/card reads
+  # that activity log while Claude is still running, so delaying this copy
+  # until process exit makes active work falsely look idle.
+  tee -a "$attempt_file" "$activity_file" <"$stream_fifo" >/dev/null &
   tee_pid=$!
   set +e
   CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${args[@]}" "$worker_prompt" >"$stream_fifo" 2>&1 &
@@ -317,7 +321,6 @@ run_claude() {
   stop_heartbeat
   wait "$tee_pid"
   tee_pid=""
-  cat "$attempt_file" >>"$activity_file"
   attempt_has_result=$(jq -se 'any(.[]; .type == "result")' "$attempt_file" 2>/dev/null || printf false)
   attempt_is_error=$(jq -r 'select(.type == "result") | .is_error // false' "$attempt_file" 2>/dev/null | tail -1)
   if [[ -f "$stalled_file" ]]; then

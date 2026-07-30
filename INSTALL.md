@@ -86,8 +86,9 @@ packet with the prior user request, prior worker result, workspace, and Git
 branch/HEAD. It does not forward private Codex reasoning or raw tool
 transcripts.
 
-While a worker runs, its job record is refreshed every five seconds and macOS
-idle sleep is prevented with `caffeinate`; closing the laptop lid or forcing
+While a worker runs, streamed Claude events are appended to the activity log
+immediately, its job record is refreshed every five seconds, and macOS idle
+sleep is prevented with `caffeinate`; closing the laptop lid or forcing
 sleep can still suspend it. Workers have no runtime budget and are never
 terminated for taking a long time. Polls wait two minutes by default, with a
 one-minute minimum, so long work does not generate high-frequency status churn.
