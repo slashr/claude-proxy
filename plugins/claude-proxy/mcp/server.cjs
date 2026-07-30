@@ -539,7 +539,7 @@ function tools() {
     { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the inline activity card for an already-started Claude worker. Use only when the user explicitly asks to inspect activity.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Polls wait one to four minutes (two minutes by default) to avoid wasteful status churn; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, synthesize worker_result. When state is cancelled, stop polling and acknowledge the cancellation. Workers have no time limit, so keep polling for as long as the job stays running, however many polls that takes.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: TOOL_POLL_MIN_WAIT_SECONDS, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS} and cannot be shorter than ${TOOL_POLL_MIN_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Polls wait one to four minutes (two minutes by default) to avoid wasteful status churn; when timed_out is true, call this tool again. Never treat timed_out as a failure or produce a final response while state is running, even if there is no progress_message. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, synthesize worker_result. When state is cancelled, stop polling and acknowledge the cancellation. Workers have no time limit, so keep polling for as long as the job stays running, however many polls that takes.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: TOOL_POLL_MIN_WAIT_SECONDS, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS} and cannot be shorter than ${TOOL_POLL_MIN_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -552,6 +552,7 @@ async function callTool(name, args) {
   if (name === "get_claude_worker_activity") return toolResult(snapshot(jobId, true));
   if (name === "claude_is_working" || name === "wait_for_claude_worker") {
     let current = snapshot(jobId);
+    const initialDetail = current.detail;
     const requestedTimeoutSeconds = Math.min(
       TOOL_POLL_MAX_WAIT_SECONDS,
       Math.max(TOOL_POLL_MIN_WAIT_SECONDS, Number(args.timeout_seconds || TOOL_POLL_DEFAULT_WAIT_SECONDS)),
@@ -565,6 +566,10 @@ async function callTool(name, args) {
       const previousRelay = lastProgressRelay.get(jobId);
       const mayRelay = !previousRelay || (Date.now() - previousRelay.at) >= PROGRESS_RELAY_MIN_INTERVAL_MS;
       if (mayRelay && current.assistant_update_count > initialAssistantUpdates && current.progress_message) {
+        lastProgressRelay.set(jobId, { at: Date.now(), assistantUpdates: current.assistant_update_count });
+        return toolResult({ ...current, worker_result: null, progress_update: true });
+      }
+      if (mayRelay && current.detail && current.detail !== initialDetail) {
         lastProgressRelay.set(jobId, { at: Date.now(), assistantUpdates: current.assistant_update_count });
         return toolResult({ ...current, worker_result: null, progress_update: true });
       }

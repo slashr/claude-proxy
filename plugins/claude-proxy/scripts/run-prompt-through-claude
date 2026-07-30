@@ -120,16 +120,12 @@ if [[ "$prompt_for_mode" =~ (^|[^[:alpha:]])(implement|build|create|add|update|m
   worker_mode="write"
 fi
 
-# Codex gives each task a stable session ID. Keep its Claude conversation for
-# follow-ups in the same workspace, which makes short replies such as "pr?"
-# useful. A different Codex task has a different session ID and cannot resume
-# this one. Explicit fresh-task wording, or a workspace mismatch, starts over.
+# Do not resume Claude's own opaque conversation in a detached worker. A large
+# or stale Claude session can block startup and, worse, carry unrelated work
+# into a new task. `run-claude-worker` instead supplies the bounded, workspace-
+# scoped Codex handoff above (the previous user request and worker result).
+# That preserves useful follow-up context without cross-task contamination.
 resume_session=false
-context_workspace=$(jq -r '.working_dir // empty' "$session_context_file" 2>/dev/null || true)
-if [[ -s "$session_file" && "$context_workspace" == "$working_dir" \
-  && ! "$prompt_for_mode" =~ (fresh[[:space:]]+claude|new[[:space:]]+claude[[:space:]]+(task|session)) ]]; then
-  resume_session=true
-fi
 
 # Workers run to completion. There is no wall-clock budget: a long task is a
 # long task, not a failure. Liveness is tracked through the worker heartbeat.
@@ -167,7 +163,7 @@ if ! mkdir "$session_lock" 2>/dev/null; then
   # lock from routing a new task to a permanently missing job.
   if [[ ( "$active_state" == "queued" || "$active_state" == "running" ) && ( "$active_process_alive" == true || $active_age -lt 300 ) ]]; then
     rm -f "$job_file"
-    jq -n --arg job_id "$active_job" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker is already running for this task. Do not start another worker; call `claude_is_working` with job_id `" + $job_id + "`. Do not call `show_claude_worker` unless the user explicitly asks to inspect activity. If it returns state `running` with progress_message, relay that message once as concise user-facing progress, then call `claude_is_working` again. When it reaches `completed`, `failed`, or `cancelled`, synthesize worker_result or acknowledge cancellation.")}}'
+    jq -n --arg job_id "$active_job" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker is already running for this task. Do not start another worker; call `claude_is_working` with job_id `" + $job_id + "`. Do not call `show_claude_worker` unless the user explicitly asks to inspect activity. If it returns state `running`, including with `timed_out: true` and no progress_message, keep polling and do not write a final answer, declare it stuck, or ask the user to reattach files. Relay a progress_message once when present, then poll again. Only synthesize a result when it reaches `completed`, `failed`, or `cancelled`.")}}'
     exit 0
   fi
   rm -f "$session_lock/job_id"
@@ -186,4 +182,4 @@ if ! /bin/launchctl submit -l "$launch_label" \
   exit 1
 fi
 
-jq -n --arg job_id "$job_id" --arg worker_mode "$worker_mode" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker was started asynchronously in " + $worker_mode + " mode. Call `claude_is_working` with job_id `" + $job_id + "`. Do not call `show_claude_worker` unless the user explicitly asks to inspect activity; keeping it hidden avoids a large widget. If it returns state `running` with progress_message, relay that message once as concise user-facing progress (without tool inputs, raw thinking, or generic waiting text), then call `claude_is_working` again. When it reaches `completed`, `failed`, or `cancelled`, synthesize worker_result or acknowledge cancellation in Codex voice. Do not use direct Codex shell commands for the task. The activity card may show safe status and tool names, never private reasoning or raw tool inputs.")}}'
+jq -n --arg job_id "$job_id" --arg worker_mode "$worker_mode" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:("A Claude worker was started asynchronously in " + $worker_mode + " mode. Call `claude_is_working` with job_id `" + $job_id + "`. Do not call `show_claude_worker` unless the user explicitly asks to inspect activity; keeping it hidden avoids a large widget. Keep polling while its state is `running`, including when `timed_out: true` and no progress_message is present; do not write a final answer, declare it stuck, or ask the user to reattach files while it is running. Relay a progress_message once when present, then poll again. Only when it reaches `completed`, `failed`, or `cancelled` should you synthesize the result or acknowledge cancellation in Codex voice. Do not use direct Codex shell commands for the task. The activity card may show safe status and tool names, never private reasoning or raw tool inputs.")}}'

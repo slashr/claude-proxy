@@ -40,7 +40,7 @@ stream_fifo=""
 last_attempt_startup_stalled=false
 last_attempt_retryable_failure=false
 startup_stall_attempts=0
-startup_stall_timeout_seconds=180
+startup_stall_timeout_seconds=150
 
 cleanup_lock() {
   if [[ $(cat "$session_lock/job_id" 2>/dev/null || true) == "$job_id" ]]; then
@@ -124,6 +124,13 @@ start_startup_watchdog() {
     if kill -0 "$observed_claude_pid" 2>/dev/null; then
       : >"$stalled_file"
       kill -TERM "$observed_claude_pid" 2>/dev/null || true
+      # Claude's Node process can ignore TERM while stuck in startup. Give it
+      # a brief graceful window, then force the attempt to end so the parent
+      # runner can record the stall and make its bounded retry.
+      sleep 5
+      if kill -0 "$observed_claude_pid" 2>/dev/null; then
+        kill -KILL "$observed_claude_pid" 2>/dev/null || true
+      fi
     fi
   ) &
   startup_watchdog_pid=$!
@@ -282,7 +289,10 @@ if [[ -z "$claude_bin" ]]; then
   exit 127
 fi
 
-base_claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5)
+# User-configured Claude MCP servers can block headless CLI startup before it
+# emits even its initial stream event. The worker needs Claude's local tools,
+# not those inherited servers, so start with an explicitly empty MCP config.
+base_claude_args=(-p --verbose --output-format stream-json --permission-mode "$permission_mode" --model claude-opus-5 --mcp-config '{"mcpServers":{}}' --strict-mcp-config)
 worker_prompt=$(build_worker_prompt)
 
 run_claude() {
