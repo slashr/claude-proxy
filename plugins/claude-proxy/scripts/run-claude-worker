@@ -33,6 +33,7 @@ job_terminal=0
 claude_pid=""
 tee_pid=""
 heartbeat_pid=""
+caffeinate_pid=""
 stream_dir=""
 stream_fifo=""
 
@@ -94,6 +95,24 @@ stop_heartbeat() {
   heartbeat_pid=""
 }
 
+start_caffeinate() {
+  # launchctl workers do not inherit an interactive power assertion. Prevent
+  # idle sleep only while this job is active; caffeinate exits with this script
+  # even if cleanup is interrupted.
+  if [[ -x /usr/bin/caffeinate ]]; then
+    /usr/bin/caffeinate -i -w "$$" >/dev/null 2>&1 &
+    caffeinate_pid=$!
+  fi
+}
+
+stop_caffeinate() {
+  if [[ -n "$caffeinate_pid" ]]; then
+    kill -TERM "$caffeinate_pid" 2>/dev/null || true
+    wait "$caffeinate_pid" 2>/dev/null || true
+  fi
+  caffeinate_pid=""
+}
+
 start_heartbeat() {
   (
     trap - TERM INT EXIT
@@ -119,6 +138,7 @@ cleanup_stream() {
 cancel_worker() {
   trap - TERM INT
   stop_heartbeat
+  stop_caffeinate
   if [[ -n "$claude_pid" ]]; then kill -TERM "$claude_pid" 2>/dev/null || true; fi
   if [[ -n "$claude_pid" ]]; then wait "$claude_pid" 2>/dev/null || true; fi
   if [[ -n "$tee_pid" ]]; then wait "$tee_pid" 2>/dev/null || true; fi
@@ -132,6 +152,7 @@ cancel_worker() {
 finalize_unexpected_exit() {
   local status=$?
   stop_heartbeat
+  stop_caffeinate
   if [[ $job_terminal -eq 0 ]]; then
     if [[ -f "$cancel_file" ]]; then
       write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143 || true
@@ -210,6 +231,7 @@ safe_summary() {
 
 : >"$activity_file"
 write_job "running" "Claude worker is starting in $worker_mode mode."
+start_caffeinate
 if [[ -f "$cancel_file" ]]; then
   write_job "cancelled" "Cancelled from ChatGPT." "" "" "No Claude tool calls reported." 143
   exit 143
@@ -229,11 +251,12 @@ worker_prompt=$(build_worker_prompt)
 
 run_claude() {
   local -a args=("$@")
-  : >"$activity_file"
+  local attempt_file attempt_has_result attempt_is_error
+  attempt_file=$(mktemp "$activity_dir/${job_id}.attempt.XXXXXX")
   stream_dir=$(mktemp -d "$activity_dir/${job_id}.stream.XXXXXX")
   stream_fifo="$stream_dir/output"
   mkfifo "$stream_fifo"
-  tee "$activity_file" <"$stream_fifo" >/dev/null &
+  tee "$attempt_file" <"$stream_fifo" >/dev/null &
   tee_pid=$!
   set +e
   CLAUDE_WORKER_MODE="$worker_mode" "$claude_bin" "${args[@]}" "$worker_prompt" >"$stream_fifo" 2>&1 &
@@ -245,21 +268,53 @@ run_claude() {
   stop_heartbeat
   wait "$tee_pid"
   tee_pid=""
+  cat "$attempt_file" >>"$activity_file"
+  attempt_has_result=$(jq -se 'any(.[]; .type == "result")' "$attempt_file" 2>/dev/null || printf false)
+  attempt_is_error=$(jq -r 'select(.type == "result") | .is_error // false' "$attempt_file" 2>/dev/null | tail -1)
+  if [[ $claude_status -ne 0 || "$attempt_has_result" != "true" || "$attempt_is_error" == "true" ]]; then
+    if grep -Eiq 'overloaded|connection closed mid-response|connection (reset|timed out)|ECONNRESET|temporarily unavailable' "$attempt_file"; then
+      last_attempt_provider_failure=true
+    else
+      last_attempt_provider_failure=false
+    fi
+  else
+    last_attempt_provider_failure=false
+  fi
+  rm -f "$attempt_file"
   set -e
   cleanup_stream
+}
+
+run_claude_with_provider_retries() {
+  local -a args=("$@")
+  local retry_attempt=0
+  local delay_seconds
+  local max_retries=3
+
+  while true; do
+    run_claude "${args[@]}"
+    [[ -f "$cancel_file" ]] && return
+    if [[ "$last_attempt_provider_failure" != true || $retry_attempt -ge $max_retries ]]; then
+      return
+    fi
+    retry_attempt=$((retry_attempt + 1))
+    delay_seconds=$((20 * (2 ** (retry_attempt - 1))))
+    write_job "running" "Claude provider is overloaded; retrying in ${delay_seconds}s (attempt ${retry_attempt}/${max_retries})." "" "" "$(safe_summary)" || true
+    sleep "$delay_seconds"
+  done
 }
 
 claude_args=("${base_claude_args[@]}")
 if [[ "$resume_session" == "true" && -s "$session_file" ]]; then
   claude_args+=(--resume "$(<"$session_file")")
-  run_claude "${claude_args[@]}"
+  run_claude_with_provider_retries "${claude_args[@]}"
   if [[ $claude_status -ne 0 ]] && grep -Eiq 'No conversation found with session ID|session[^[:alnum:]]+(not found|does not exist)' "$activity_file"; then
     rm -f "$session_file"
     claude_args=("${base_claude_args[@]}")
-    run_claude "${claude_args[@]}"
+    run_claude_with_provider_retries "${claude_args[@]}"
   fi
 else
-  run_claude "${claude_args[@]}"
+  run_claude_with_provider_retries "${claude_args[@]}"
 fi
 
 if [[ -f "$cancel_file" ]]; then

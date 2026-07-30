@@ -1,6 +1,6 @@
 {
   "name": "claude-proxy",
-  "version": "0.1.0+codex.20260729193528",
+  "version": "0.1.0+codex.20260730072545",
   "description": "Runs Claude Code workers with a live inline activity view in ChatGPT desktop.",
   "author": {
     "name": "Akash"
@@ -8,7 +8,7 @@
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "Claude Proxy",
+    "displayName": "Claude Worker",
     "shortDescription": "Use Claude Code with live worker activity.",
     "longDescription": "Routes substantive tasks to Claude Code while an inline activity card shows safe live worker progress, then returns the result to Codex for verification and presentation.",
     "developerName": "Akash",

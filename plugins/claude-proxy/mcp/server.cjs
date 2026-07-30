@@ -8,7 +8,7 @@ const { spawnSync } = require("node:child_process");
 
 const PLUGIN_ROOT = path.resolve(__dirname, "..");
 const manifest = JSON.parse(fs.readFileSync(path.join(PLUGIN_ROOT, ".codex-plugin", "plugin.json"), "utf8"));
-const SERVER_NAME = "claude-proxy-activity";
+const SERVER_NAME = "claude-worker";
 const SERVER_VERSION = manifest.version;
 const WIDGET_URI = `ui://claude-proxy/activity-${encodeURIComponent(SERVER_VERSION)}.html`;
 const WIDGET_MIME = "text/html;profile=mcp-app";
@@ -18,13 +18,17 @@ const DATA_DIR = process.env.PLUGIN_DATA
   || process.env.CLAUDE_PLUGIN_DATA
   || path.join(os.homedir(), ".codex", "plugins", "data", `${PLUGIN_NAME}-${MARKETPLACE}`);
 const JOB_DIR = path.join(DATA_DIR, "claude-jobs");
-const PROGRESS_RELAY_MIN_INTERVAL_MS = 3000;
+// Progress is useful, but relaying every assistant update makes a long worker
+// unnecessarily expensive for the host. Keep normal polls lean and only offer
+// a user-facing update at most once per minute.
+const PROGRESS_RELAY_MIN_INTERVAL_MS = 60_000;
 // Workers have no runtime budget: polling continues for as long as the work
 // takes. The only backstop is liveness, so a worker that was killed outright
 // cannot be polled forever. The worker heartbeats every five seconds, so a
 // silence this long means it is gone, and the PID check keeps a machine that
 // slept mid-job from being mistaken for a dead one.
 const WORKER_HEARTBEAT_TIMEOUT_SECONDS = 300;
+const TOOL_POLL_MIN_WAIT_SECONDS = 60;
 const TOOL_POLL_DEFAULT_WAIT_SECONDS = 120;
 const TOOL_POLL_MAX_WAIT_SECONDS = 240;
 const lastProgressRelay = new Map();
@@ -535,7 +539,7 @@ function tools() {
     { name: "show_claude_worker", title: "Show Claude worker activity", description: "Open the inline activity card for an already-started Claude worker. Use only when the user explicitly asks to inspect activity.", inputSchema: schema, annotations: { readOnlyHint: true }, _meta: uiMeta() },
     { name: "get_claude_worker_status", title: "Get Claude worker status", description: "Read lean live status, provider retry count, and tool-name summary for a Claude worker.", inputSchema: schema, annotations: { readOnlyHint: true } },
     { name: "get_claude_worker_activity", title: "Get Claude worker activity", description: "Read the redacted live transcript, tool inputs/results, and worker status for the inline activity widget.", inputSchema: schema, annotations: { readOnlyHint: true } },
-    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Each poll returns within four minutes so the host request cannot expire; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, synthesize worker_result. When state is cancelled, stop polling and acknowledge the cancellation. Workers have no time limit, so keep polling for as long as the job stays running, however many polls that takes.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: 1, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
+    { name: "claude_is_working", title: "Claude is working…", description: "Poll until a Claude worker finishes, is cancelled, or emits a safe, rate-limited progress message. Polls wait one to four minutes (two minutes by default) to avoid wasteful status churn; when timed_out is true, call this tool again. When state is running and progress_message is present, relay it to the user. When it reaches completed or failed, synthesize worker_result. When state is cancelled, stop polling and acknowledge the cancellation. Workers have no time limit, so keep polling for as long as the job stays running, however many polls that takes.", inputSchema: { ...schema, properties: { ...schema.properties, timeout_seconds: { type: "integer", minimum: TOOL_POLL_MIN_WAIT_SECONDS, maximum: TOOL_POLL_MAX_WAIT_SECONDS, description: `Maximum time for this poll; defaults to ${TOOL_POLL_DEFAULT_WAIT_SECONDS} and cannot be shorter than ${TOOL_POLL_MIN_WAIT_SECONDS}.` } } }, annotations: { readOnlyHint: true }, _meta: { "openai/toolInvocation/invoking": "Claude is working…", "openai/toolInvocation/invoked": "Claude updated" } },
   ];
 }
 
@@ -550,7 +554,7 @@ async function callTool(name, args) {
     let current = snapshot(jobId);
     const requestedTimeoutSeconds = Math.min(
       TOOL_POLL_MAX_WAIT_SECONDS,
-      Math.max(1, Number(args.timeout_seconds || TOOL_POLL_DEFAULT_WAIT_SECONDS)),
+      Math.max(TOOL_POLL_MIN_WAIT_SECONDS, Number(args.timeout_seconds || TOOL_POLL_DEFAULT_WAIT_SECONDS)),
     );
     const deadline = Date.now() + (requestedTimeoutSeconds * 1000);
     const initialAssistantUpdates = current.assistant_update_count || 0;
@@ -594,7 +598,7 @@ async function handle(message) {
   if (!plainObject(message)) return rpcError(null, -32600, "Invalid Request");
   if (typeof message.method !== "string") return rpcError(message.id ?? null, -32600, "Invalid method");
   if (message.method.startsWith("notifications/") || message.method === "$/cancelRequest") return null;
-  if (message.method === "initialize") return rpc(message.id, { protocolVersion: message.params?.protocolVersion || "2024-11-05", capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: SERVER_NAME, title: "Claude worker activity", version: SERVER_VERSION }, instructions: "Use claude_is_working after the Claude prompt hook provides a job ID. Open show_claude_worker only when the user explicitly asks to inspect activity." });
+  if (message.method === "initialize") return rpc(message.id, { protocolVersion: message.params?.protocolVersion || "2024-11-05", capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } }, serverInfo: { name: SERVER_NAME, title: "Claude Worker", version: SERVER_VERSION }, instructions: "Use claude_is_working after the Claude prompt hook provides a job ID. Open show_claude_worker only when the user explicitly asks to inspect activity." });
   if (message.method === "ping") return rpc(message.id, {});
   if (message.method === "tools/list") return rpc(message.id, { tools: tools() });
   if (message.method === "tools/call") {
