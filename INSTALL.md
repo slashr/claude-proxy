@@ -96,9 +96,15 @@ been silent for five minutes and whose process is gone is unloaded from launchd
 and recorded as failed, so a job killed outright cannot be polled forever. A
 stale per-task lock is recovered by the same rule. Transient provider overloads
 or dropped mid-response connections are retried up to three times with 20, 40,
-and 80 second backoff. A separate startup watchdog retries a Claude CLI that
-emits no first stream event within three minutes; it stops watching as soon as
-any activity arrives, so it never limits legitimate long-running work.
+and 80 second backoff. Workers launch fresh with a bounded, workspace-scoped
+Codex handoff rather than resuming Claude's opaque prior conversation. They
+also launch with an empty Claude MCP configuration, which avoids unrelated
+user-configured MCP servers blocking headless startup.
+A separate startup watchdog retries a Claude CLI that emits no first stream
+event within two and a half minutes; it stops watching as soon as any activity
+arrives, so it never limits legitimate long-running work. A CLI that ignores
+its graceful termination is force-stopped after five seconds so the retry can
+proceed.
 
 ## Stopping work
 
